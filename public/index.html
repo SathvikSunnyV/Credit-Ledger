@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>The Ledger — Loan Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <div id="lockScreen" class="lock-screen">
+    <div class="lock-card">
+      <p class="lock-eyebrow">The Ledger</p>
+      <h1>Enter the password</h1>
+      <p class="lock-sub">Set in your <code>.env</code> as DASHBOARD_PASSWORD.</p>
+      <input id="passwordInput" type="password" placeholder="Password" autocomplete="current-password" />
+      <button id="unlockBtn">Unlock</button>
+      <p id="lockError" class="lock-error"></p>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">§</span>
+        <div>
+          <h1>The Ledger</h1>
+          <p class="tagline">Who owes what, and when it's owed</p>
+        </div>
+      </div>
+      <button id="openFormBtn" class="btn-primary">+ New entry</button>
+    </header>
+
+    <main>
+      <section class="summary-row" id="summaryRow"></section>
+
+      <section class="ledger-wrap">
+        <div class="ledger-head">
+          <span>Borrower</span>
+          <span>Principal</span>
+          <span>Rate / mo</span>
+          <span>Due</span>
+          <span>Paid</span>
+          <span>Remaining</span>
+          <span>Status</span>
+          <span></span>
+        </div>
+        <div id="ledgerBody" class="ledger-body">
+          <p class="empty-state">No entries yet. Add someone above and the ledger will start tracking them automatically.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footnote">
+      Reminders and overdue alerts are sent automatically once a day by the server — nothing here needs to be triggered by hand.
+      <button id="runCheckBtn" class="btn-ghost">Run check now (test)</button>
+    </footer>
+  </div>
+
+  <div id="formOverlay" class="overlay hidden">
+    <form id="loanForm" class="loan-form">
+      <h2>New ledger entry</h2>
+
+      <label>Borrower's name
+        <input type="text" name="name" required placeholder="e.g. Priya Sharma" />
+      </label>
+
+      <label>Borrower's email
+        <input type="email" name="email" required placeholder="priya@example.com" />
+      </label>
+
+      <label>Amount lent (₹)
+        <input type="number" name="principal" required min="1" step="0.01" placeholder="10000" />
+      </label>
+
+      <label>Interest per month (%)
+        <input type="number" name="monthlyRate" required min="0" step="0.01" placeholder="2" />
+      </label>
+
+      <label>Date lent
+        <input type="date" name="startDate" required />
+      </label>
+
+      <label>Repayment due date
+        <input type="date" name="dueDate" required />
+      </label>
+
+      <div class="form-actions">
+        <button type="button" id="cancelFormBtn" class="btn-ghost">Cancel</button>
+        <button type="submit" class="btn-primary">Save entry</button>
+      </div>
+      <p id="formError" class="form-error"></p>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

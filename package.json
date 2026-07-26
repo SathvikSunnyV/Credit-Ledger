@@ -1,0 +1,19 @@
+{
+  "name": "loan-tracker",
+  "version": "1.0.0",
+  "description": "Personal loan/lending tracker that emails borrowers about repayment via Brevo API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
