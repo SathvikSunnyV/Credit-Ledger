@@ -19,16 +19,6 @@ jobs:
           curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
           echo "Render is awake."
 
-      - name: Run daily loan check
-        run: |
-          echo "Running daily loan check..."
-
-          curl -fsS -X POST \
-            -H "x-dashboard-password: ${{ secrets.DASHBOARD_PASSWORD }}" \
-            "https://credit-ledger-eqrh.onrender.com/api/run-check"
-
-          echo "Daily loan check completed."
-
       - name: Keep Render awake for 5 minutes
         run: |
           echo "Keeping Render awake..."
