@@ -27,7 +27,7 @@ jobs:
           do
             echo "Ping $i/5"
             curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
-            sleep 60
+            sleep 600
           done
 
           echo "Finished 5-minute wake period."
