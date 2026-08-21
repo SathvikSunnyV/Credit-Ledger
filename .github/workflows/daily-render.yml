@@ -1,0 +1,43 @@
+name: Daily Render Wake
+
+on:
+  schedule:
+    # 9:00 AM IST = 3:30 AM UTC
+    - cron: '30 3 * * *'
+
+  # Allows manual testing
+  workflow_dispatch:
+
+jobs:
+  wake-render:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wake Render
+        run: |
+          echo "Waking Render..."
+          curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
+          echo "Render is awake."
+
+      - name: Run daily loan check
+        run: |
+          echo "Running daily loan check..."
+
+          curl -fsS -X POST \
+            -H "x-dashboard-password: ${{ secrets.DASHBOARD_PASSWORD }}" \
+            "https://credit-ledger-eqrh.onrender.com/api/run-check"
+
+          echo "Daily loan check completed."
+
+      - name: Keep Render awake for 5 minutes
+        run: |
+          echo "Keeping Render awake..."
+
+          for i in {1..5}
+          do
+            echo "Ping $i/5"
+            curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
+            sleep 60
+          done
+
+          echo "Finished 5-minute wake period."
