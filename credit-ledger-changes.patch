@@ -1,0 +1,231 @@
+diff --git a/.github/workflows/daily-render.yml b/.github/workflows/daily-render.yml
+index ff04f65..d4a8a6d 100644
+--- a/.github/workflows/daily-render.yml
++++ b/.github/workflows/daily-render.yml
+@@ -1,33 +1,52 @@
+-name: Daily Render Wake
++name: Daily Loan Check
+ 
+ on:
+   schedule:
+-    # 9:00 AM IST = 3:30 AM UTC
++    # Primary run: 9:00 AM IST = 3:30 AM UTC
+     - cron: '30 3 * * *'
++    # Safety-net run: 15 min later, in case the primary run was delayed/skipped
++    # by GitHub's scheduler (it doesn't guarantee exact timing). This is safe to
++    # run even if the primary run already succeeded - the app itself will not
++    # send a duplicate email for the same day.
++    - cron: '45 3 * * *'
+ 
+-  # Allows manual testing
++  # Allows manual testing from the Actions tab
+   workflow_dispatch:
+ 
+ jobs:
+-  wake-render:
++  trigger-check:
+     runs-on: ubuntu-latest
+ 
+     steps:
+-      - name: Wake Render
++      - name: Wake Render and wait until it responds
+         run: |
++          URL="https://credit-ledger-eqrh.onrender.com"
+           echo "Waking Render..."
+-          curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
+-          echo "Render is awake."
++          for i in $(seq 1 15); do
++            if curl -fsS -m 15 "$URL/api/health" > /dev/null; then
++              echo "Render responded on attempt $i - awake."
++              exit 0
++            fi
++            echo "Not ready yet (attempt $i/15), retrying in 10s..."
++            sleep 10
++          done
++          echo "Render never responded after ~2.5 minutes."
++          exit 1
+ 
+-      - name: Keep Render awake for 5 minutes
++      - name: Trigger the daily loan check
+         run: |
+-          echo "Keeping Render awake..."
+-
+-          for i in {1..5}
+-          do
+-            echo "Ping $i/5"
+-            curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
+-            sleep 600
++          URL="https://credit-ledger-eqrh.onrender.com"
++          echo "Triggering /api/run-check..."
++          for i in $(seq 1 5); do
++            if curl -fsS -m 30 -X POST "$URL/api/run-check" \
++                -H "Content-Type: application/json" \
++                -H "x-dashboard-password: ${{ secrets.DASHBOARD_PASSWORD }}"; then
++              echo ""
++              echo "Check triggered successfully."
++              exit 0
++            fi
++            echo "Attempt $i/5 failed, retrying in 10s..."
++            sleep 10
+           done
+-
+-          echo "Finished 5-minute wake period."
++          echo "Failed to trigger the check after 5 attempts."
++          exit 1
+diff --git a/cron.js b/cron.js
+index 0444819..6e4c1e7 100644
+--- a/cron.js
++++ b/cron.js
+@@ -7,7 +7,7 @@ const cron = require('node-cron');
+ const { readLoans, updateLoan } = require('./store');
+ const { calculateDue, daysBetween } = require('./interest');
+ const { sendEmail } = require('./brevo');
+-const { dueTodayEmail, overdueEmail } = require('./templates');
++const { dueTodayEmail, overdueEmail, upcomingDueEmail } = require('./templates');
+ 
+ function todayStr() {
+   return new Date().toISOString().slice(0, 10);
+@@ -18,7 +18,12 @@ async function runDailyCheck() {
+   const loans = await readLoans();
+   const today = new Date();
+   const lenderName = process.env.SENDER_NAME || 'Your Lender';
+-  const overdueGapDays = Number(process.env.OVERDUE_REMINDER_GAP_DAYS || 3);
++  // How many days before the due date to start sending reminders (daily).
++  const upcomingReminderDays = Number(process.env.UPCOMING_REMINDER_DAYS || 3);
++  // Gap between repeated overdue emails. Defaults to 1 = every single day the loan
++  // remains unpaid past its due date, since idempotency below already prevents
++  // more than one send per calendar day even if this check runs more than once.
++  const overdueGapDays = Number(process.env.OVERDUE_REMINDER_GAP_DAYS || 1);
+ 
+   for (const loan of loans) {
+     if (loan.status === 'paid') continue;
+@@ -35,7 +40,28 @@ async function runDailyCheck() {
+         continue;
+       }
+ 
+-      if (diffDays === 0 && loan.dueReminderSentOn !== todayStr()) {
++      if (diffDays < 0 && diffDays >= -upcomingReminderDays && loan.lastUpcomingReminderOn !== todayStr()) {
++        // Within the reminder window (e.g. 3 days before due), one email per day.
++        const { months, interest, total } = precheck;
++        const remaining = Math.round((total - amountPaid) * 100) / 100;
++        const daysLeft = -diffDays;
++        const { subject, htmlContent } = upcomingDueEmail({
++          name: loan.name,
++          principal: loan.principal,
++          monthlyRate: loan.monthlyRate,
++          months,
++          interest,
++          total,
++          amountPaid,
++          remaining,
++          dueDate: loan.dueDate,
++          daysLeft,
++          lenderName,
++        });
++        await sendEmail({ toEmail: loan.email, toName: loan.name, subject, htmlContent });
++        await updateLoan(loan.id, { lastUpcomingReminderOn: todayStr(), lastComputedTotal: total });
++        console.log(`[cron] Sent upcoming-due email to ${loan.email} (${daysLeft} day(s) left)`);
++      } else if (diffDays === 0 && loan.dueReminderSentOn !== todayStr()) {
+         // Due exactly today
+         const { months, interest, total } = precheck;
+         const remaining = Math.round((total - amountPaid) * 100) / 100;
+@@ -88,10 +114,15 @@ async function runDailyCheck() {
+ 
+ function startCron() {
+   const hour = Number(process.env.CHECK_HOUR || 9);
+-  // Runs every day at the configured hour, minute 0.
++  // Runs every day at the configured hour, minute 0, in IST - not server local time.
++  // (Render's containers run in UTC, so without this "0 9 * * *" would actually
++  // fire at 9:00 UTC = 2:30 PM IST.) This only matters if the process happens to
++  // be alive at that exact minute; on the free tier the GitHub Action that calls
++  // POST /api/run-check is the real trigger - this is just a backup for whenever
++  // the app is awake anyway (e.g. if you upgrade off the free tier later).
+   const expression = `0 ${hour} * * *`;
+-  cron.schedule(expression, runDailyCheck);
+-  console.log(`[cron] Scheduled daily check for ${hour}:00 server time (expression: "${expression}")`);
++  cron.schedule(expression, runDailyCheck, { timezone: 'Asia/Kolkata' });
++  console.log(`[cron] Scheduled daily check for ${hour}:00 IST (expression: "${expression}")`);
+ }
+ 
+ module.exports = { startCron, runDailyCheck };
+\ No newline at end of file
+diff --git a/schema.sql b/schema.sql
+index acb8c50..9e69f50 100644
+--- a/schema.sql
++++ b/schema.sql
+@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS loans (
+   status                 TEXT NOT NULL DEFAULT 'pending',
+   amount_paid            NUMERIC(12, 2) NOT NULL DEFAULT 0,
+   due_reminder_sent_on   DATE,
++  last_upcoming_reminder_on DATE,
+   last_overdue_email_on  DATE,
+   last_computed_total    NUMERIC(12, 2),
+   last_payment_on        DATE,
+@@ -22,3 +23,7 @@ CREATE TABLE IF NOT EXISTS loans (
+ 
+ CREATE INDEX IF NOT EXISTS idx_loans_status ON loans (status);
+ CREATE INDEX IF NOT EXISTS idx_loans_due_date ON loans (due_date);
++
++-- Migration: if your table already existed before this column was added,
++-- this line adds it without touching anything else. Safe to run any number of times.
++ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_upcoming_reminder_on DATE;
+diff --git a/store.js b/store.js
+index 9e8752f..a71b93e 100644
+--- a/store.js
++++ b/store.js
+@@ -15,6 +15,7 @@ const FIELD_MAP = {
+   status: 'status',
+   amountPaid: 'amount_paid',
+   dueReminderSentOn: 'due_reminder_sent_on',
++  lastUpcomingReminderOn: 'last_upcoming_reminder_on',
+   lastOverdueEmailOn: 'last_overdue_email_on',
+   lastComputedTotal: 'last_computed_total',
+   lastPaymentOn: 'last_payment_on',
+@@ -42,6 +43,7 @@ function rowToLoan(row) {
+     status: row.status,
+     amountPaid: Number(row.amount_paid || 0),
+     dueReminderSentOn: toDateStr(row.due_reminder_sent_on),
++    lastUpcomingReminderOn: toDateStr(row.last_upcoming_reminder_on),
+     lastOverdueEmailOn: toDateStr(row.last_overdue_email_on),
+     lastComputedTotal: row.last_computed_total !== null ? Number(row.last_computed_total) : null,
+     lastPaymentOn: toDateStr(row.last_payment_on),
+diff --git a/templates.js b/templates.js
+index 6e3ee57..8fd5512 100644
+--- a/templates.js
++++ b/templates.js
+@@ -31,6 +31,27 @@ function dueTodayEmail({ name, principal, monthlyRate, months, interest, total,
+   return { subject, htmlContent };
+ }
+ 
++function upcomingDueEmail({ name, principal, monthlyRate, months, interest, total, amountPaid, remaining, dueDate, daysLeft, lenderName }) {
++  const owed = remaining !== undefined ? remaining : total;
++  const subject = `Payment reminder: ₹${money(owed)} due in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
++  const htmlContent = `
++    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: auto; color: #222;">
++      <h2 style="color:#1a1a1a;">Upcoming Payment Reminder</h2>
++      <p>Hi ${name},</p>
++      <p>Just a heads up - your repayment of <strong>₹${money(owed)}</strong> is due on <strong>${dueDate}</strong>, which is <strong>${daysLeft} day${daysLeft === 1 ? '' : 's'}</strong> from now.</p>
++      <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
++        <tr><td style="padding:6px 0; color:#555;">Original amount</td><td style="padding:6px 0; text-align:right;">₹${money(principal)}</td></tr>
++        <tr><td style="padding:6px 0; color:#555;">Interest (${monthlyRate}%/month × ${months} month${months === 1 ? '' : 's'})</td><td style="padding:6px 0; text-align:right;">₹${money(interest)}</td></tr>
++        ${paymentRow(amountPaid)}
++        <tr style="border-top: 1px solid #ddd; font-weight:bold;"><td style="padding:8px 0;">Total due</td><td style="padding:8px 0; text-align:right;">₹${money(owed)}</td></tr>
++      </table>
++      <p>No action needed if you're already planning to pay by then - just a friendly heads up.</p>
++      <p>Thanks,<br/>${lenderName}</p>
++    </div>
++  `;
++  return { subject, htmlContent };
++}
++
+ function overdueEmail({ name, principal, monthlyRate, months, interest, total, amountPaid, remaining, dueDate, daysOverdue, lenderName }) {
+   const owed = remaining !== undefined ? remaining : total;
+   const subject = `Overdue: ₹${money(owed)} payment is ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} late`;
+@@ -155,6 +176,7 @@ function loanDeletedEmail({ name, principal, lenderName }) {
+ 
+ module.exports = {
+   dueTodayEmail,
++  upcomingDueEmail,
+   overdueEmail,
+   manualReminderEmail,
+   paymentReceiptEmail,
