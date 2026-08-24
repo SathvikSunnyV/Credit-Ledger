@@ -7,7 +7,7 @@ const cron = require('node-cron');
 const { readLoans, updateLoan } = require('./store');
 const { calculateDue, daysBetween } = require('./interest');
 const { sendEmail } = require('./brevo');
-const { dueTodayEmail, overdueEmail } = require('./templates');
+const { dueTodayEmail, overdueEmail, upcomingDueEmail } = require('./templates');
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -18,7 +18,12 @@ async function runDailyCheck() {
   const loans = await readLoans();
   const today = new Date();
   const lenderName = process.env.SENDER_NAME || 'Your Lender';
-  const overdueGapDays = Number(process.env.OVERDUE_REMINDER_GAP_DAYS || 3);
+  // How many days before the due date to start sending reminders (daily).
+  const upcomingReminderDays = Number(process.env.UPCOMING_REMINDER_DAYS || 3);
+  // Gap between repeated overdue emails. Defaults to 1 = every single day the loan
+  // remains unpaid past its due date, since idempotency below already prevents
+  // more than one send per calendar day even if this check runs more than once.
+  const overdueGapDays = Number(process.env.OVERDUE_REMINDER_GAP_DAYS || 1);
 
   for (const loan of loans) {
     if (loan.status === 'paid') continue;
@@ -35,7 +40,28 @@ async function runDailyCheck() {
         continue;
       }
 
-      if (diffDays === 0 && loan.dueReminderSentOn !== todayStr()) {
+      if (diffDays < 0 && diffDays >= -upcomingReminderDays && loan.lastUpcomingReminderOn !== todayStr()) {
+        // Within the reminder window (e.g. 3 days before due), one email per day.
+        const { months, interest, total } = precheck;
+        const remaining = Math.round((total - amountPaid) * 100) / 100;
+        const daysLeft = -diffDays;
+        const { subject, htmlContent } = upcomingDueEmail({
+          name: loan.name,
+          principal: loan.principal,
+          monthlyRate: loan.monthlyRate,
+          months,
+          interest,
+          total,
+          amountPaid,
+          remaining,
+          dueDate: loan.dueDate,
+          daysLeft,
+          lenderName,
+        });
+        await sendEmail({ toEmail: loan.email, toName: loan.name, subject, htmlContent });
+        await updateLoan(loan.id, { lastUpcomingReminderOn: todayStr(), lastComputedTotal: total });
+        console.log(`[cron] Sent upcoming-due email to ${loan.email} (${daysLeft} day(s) left)`);
+      } else if (diffDays === 0 && loan.dueReminderSentOn !== todayStr()) {
         // Due exactly today
         const { months, interest, total } = precheck;
         const remaining = Math.round((total - amountPaid) * 100) / 100;
@@ -88,10 +114,15 @@ async function runDailyCheck() {
 
 function startCron() {
   const hour = Number(process.env.CHECK_HOUR || 9);
-  // Runs every day at the configured hour, minute 0.
+  // Runs every day at the configured hour, minute 0, in IST - not server local time.
+  // (Render's containers run in UTC, so without this "0 9 * * *" would actually
+  // fire at 9:00 UTC = 2:30 PM IST.) This only matters if the process happens to
+  // be alive at that exact minute; on the free tier the GitHub Action that calls
+  // POST /api/run-check is the real trigger - this is just a backup for whenever
+  // the app is awake anyway (e.g. if you upgrade off the free tier later).
   const expression = `0 ${hour} * * *`;
-  cron.schedule(expression, runDailyCheck);
-  console.log(`[cron] Scheduled daily check for ${hour}:00 server time (expression: "${expression}")`);
+  cron.schedule(expression, runDailyCheck, { timezone: 'Asia/Kolkata' });
+  console.log(`[cron] Scheduled daily check for ${hour}:00 IST (expression: "${expression}")`);
 }
 
 module.exports = { startCron, runDailyCheck };

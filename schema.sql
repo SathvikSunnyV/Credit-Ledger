@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS loans (
   status                 TEXT NOT NULL DEFAULT 'pending',
   amount_paid            NUMERIC(12, 2) NOT NULL DEFAULT 0,
   due_reminder_sent_on   DATE,
+  last_upcoming_reminder_on DATE,
   last_overdue_email_on  DATE,
   last_computed_total    NUMERIC(12, 2),
   last_payment_on        DATE,
@@ -22,3 +23,7 @@ CREATE TABLE IF NOT EXISTS loans (
 
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans (status);
 CREATE INDEX IF NOT EXISTS idx_loans_due_date ON loans (due_date);
+
+-- Migration: if your table already existed before this column was added,
+-- this line adds it without touching anything else. Safe to run any number of times.
+ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_upcoming_reminder_on DATE;
