@@ -31,6 +31,27 @@ function dueTodayEmail({ name, principal, monthlyRate, months, interest, total, 
   return { subject, htmlContent };
 }
 
+function upcomingDueEmail({ name, principal, monthlyRate, months, interest, total, amountPaid, remaining, dueDate, daysLeft, lenderName }) {
+  const owed = remaining !== undefined ? remaining : total;
+  const subject = `Payment reminder: ₹${money(owed)} due in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
+  const htmlContent = `
+    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: auto; color: #222;">
+      <h2 style="color:#1a1a1a;">Upcoming Payment Reminder</h2>
+      <p>Hi ${name},</p>
+      <p>Just a heads up - your repayment of <strong>₹${money(owed)}</strong> is due on <strong>${dueDate}</strong>, which is <strong>${daysLeft} day${daysLeft === 1 ? '' : 's'}</strong> from now.</p>
+      <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+        <tr><td style="padding:6px 0; color:#555;">Original amount</td><td style="padding:6px 0; text-align:right;">₹${money(principal)}</td></tr>
+        <tr><td style="padding:6px 0; color:#555;">Interest (${monthlyRate}%/month × ${months} month${months === 1 ? '' : 's'})</td><td style="padding:6px 0; text-align:right;">₹${money(interest)}</td></tr>
+        ${paymentRow(amountPaid)}
+        <tr style="border-top: 1px solid #ddd; font-weight:bold;"><td style="padding:8px 0;">Total due</td><td style="padding:8px 0; text-align:right;">₹${money(owed)}</td></tr>
+      </table>
+      <p>No action needed if you're already planning to pay by then - just a friendly heads up.</p>
+      <p>Thanks,<br/>${lenderName}</p>
+    </div>
+  `;
+  return { subject, htmlContent };
+}
+
 function overdueEmail({ name, principal, monthlyRate, months, interest, total, amountPaid, remaining, dueDate, daysOverdue, lenderName }) {
   const owed = remaining !== undefined ? remaining : total;
   const subject = `Overdue: ₹${money(owed)} payment is ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} late`;
@@ -155,6 +176,7 @@ function loanDeletedEmail({ name, principal, lenderName }) {
 
 module.exports = {
   dueTodayEmail,
+  upcomingDueEmail,
   overdueEmail,
   manualReminderEmail,
   paymentReceiptEmail,
