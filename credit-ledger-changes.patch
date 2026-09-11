@@ -1,231 +1,715 @@
-diff --git a/.github/workflows/daily-render.yml b/.github/workflows/daily-render.yml
-index ff04f65..d4a8a6d 100644
---- a/.github/workflows/daily-render.yml
-+++ b/.github/workflows/daily-render.yml
-@@ -1,33 +1,52 @@
--name: Daily Render Wake
-+name: Daily Loan Check
+diff --git a/README.md b/README.md
+index ac56d20..9835a17 100644
+--- a/README.md
++++ b/README.md
+@@ -12,8 +12,9 @@ app runs on its own:
+ - You never trigger anything by hand — just mark an entry "paid" once someone
+   actually pays you back, and the reminders stop.
  
- on:
-   schedule:
--    # 9:00 AM IST = 3:30 AM UTC
-+    # Primary run: 9:00 AM IST = 3:30 AM UTC
-     - cron: '30 3 * * *'
-+    # Safety-net run: 15 min later, in case the primary run was delayed/skipped
-+    # by GitHub's scheduler (it doesn't guarantee exact timing). This is safe to
-+    # run even if the primary run already succeeded - the app itself will not
-+    # send a duplicate email for the same day.
-+    - cron: '45 3 * * *'
+-No database to set up. Everything is stored in one JSON file (`data/loans.json`)
+-that the server reads and writes automatically.
++Data is stored in Postgres (a free [Neon](https://neon.tech) database works well).
++You run `schema.sql` once to create the table, then the server reads/writes it
++automatically from then on.
  
--  # Allows manual testing
-+  # Allows manual testing from the Actions tab
-   workflow_dispatch:
+ ## 1. Install
  
- jobs:
--  wake-render:
-+  trigger-check:
-     runs-on: ubuntu-latest
+@@ -24,7 +25,15 @@ cd loan-tracker
+ npm install
+ ```
  
-     steps:
--      - name: Wake Render
-+      - name: Wake Render and wait until it responds
-         run: |
-+          URL="https://credit-ledger-eqrh.onrender.com"
-           echo "Waking Render..."
--          curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
--          echo "Render is awake."
-+          for i in $(seq 1 15); do
-+            if curl -fsS -m 15 "$URL/api/health" > /dev/null; then
-+              echo "Render responded on attempt $i - awake."
-+              exit 0
-+            fi
-+            echo "Not ready yet (attempt $i/15), retrying in 10s..."
-+            sleep 10
-+          done
-+          echo "Render never responded after ~2.5 minutes."
-+          exit 1
+-## 2. Configure
++## 2. Set up the database
++
++Create a free [Neon](https://neon.tech) Postgres project, then run `schema.sql`
++once against it — easiest way is Neon's dashboard → SQL Editor → paste the
++contents of `schema.sql` → Run. It's safe to re-run any time (it only creates
++things that don't already exist yet), so re-running it after pulling an update
++is the way to pick up new columns.
++
++## 3. Configure
  
--      - name: Keep Render awake for 5 minutes
-+      - name: Trigger the daily loan check
-         run: |
--          echo "Keeping Render awake..."
--
--          for i in {1..5}
--          do
--            echo "Ping $i/5"
--            curl -fsS "https://credit-ledger-eqrh.onrender.com/api/health"
--            sleep 600
-+          URL="https://credit-ledger-eqrh.onrender.com"
-+          echo "Triggering /api/run-check..."
-+          for i in $(seq 1 5); do
-+            if curl -fsS -m 30 -X POST "$URL/api/run-check" \
-+                -H "Content-Type: application/json" \
-+                -H "x-dashboard-password: ${{ secrets.DASHBOARD_PASSWORD }}"; then
-+              echo ""
-+              echo "Check triggered successfully."
-+              exit 0
-+            fi
-+            echo "Attempt $i/5 failed, retrying in 10s..."
-+            sleep 10
-           done
--
--          echo "Finished 5-minute wake period."
-+          echo "Failed to trigger the check after 5 attempts."
-+          exit 1
-diff --git a/cron.js b/cron.js
-index 0444819..6e4c1e7 100644
---- a/cron.js
-+++ b/cron.js
-@@ -7,7 +7,7 @@ const cron = require('node-cron');
- const { readLoans, updateLoan } = require('./store');
- const { calculateDue, daysBetween } = require('./interest');
- const { sendEmail } = require('./brevo');
--const { dueTodayEmail, overdueEmail } = require('./templates');
-+const { dueTodayEmail, overdueEmail, upcomingDueEmail } = require('./templates');
+ Copy the example environment file and fill in your real values:
  
- function todayStr() {
-   return new Date().toISOString().slice(0, 10);
-@@ -18,7 +18,12 @@ async function runDailyCheck() {
-   const loans = await readLoans();
-   const today = new Date();
-   const lenderName = process.env.SENDER_NAME || 'Your Lender';
--  const overdueGapDays = Number(process.env.OVERDUE_REMINDER_GAP_DAYS || 3);
-+  // How many days before the due date to start sending reminders (daily).
-+  const upcomingReminderDays = Number(process.env.UPCOMING_REMINDER_DAYS || 3);
-+  // Gap between repeated overdue emails. Defaults to 1 = every single day the loan
-+  // remains unpaid past its due date, since idempotency below already prevents
-+  // more than one send per calendar day even if this check runs more than once.
-+  const overdueGapDays = Number(process.env.OVERDUE_REMINDER_GAP_DAYS || 1);
+@@ -34,6 +43,7 @@ cp .env.example .env
  
-   for (const loan of loans) {
-     if (loan.status === 'paid') continue;
-@@ -35,7 +40,28 @@ async function runDailyCheck() {
-         continue;
-       }
+ Open `.env` and set:
  
--      if (diffDays === 0 && loan.dueReminderSentOn !== todayStr()) {
-+      if (diffDays < 0 && diffDays >= -upcomingReminderDays && loan.lastUpcomingReminderOn !== todayStr()) {
-+        // Within the reminder window (e.g. 3 days before due), one email per day.
-+        const { months, interest, total } = precheck;
-+        const remaining = Math.round((total - amountPaid) * 100) / 100;
-+        const daysLeft = -diffDays;
-+        const { subject, htmlContent } = upcomingDueEmail({
-+          name: loan.name,
-+          principal: loan.principal,
-+          monthlyRate: loan.monthlyRate,
-+          months,
-+          interest,
-+          total,
-+          amountPaid,
-+          remaining,
-+          dueDate: loan.dueDate,
-+          daysLeft,
-+          lenderName,
-+        });
-+        await sendEmail({ toEmail: loan.email, toName: loan.name, subject, htmlContent });
-+        await updateLoan(loan.id, { lastUpcomingReminderOn: todayStr(), lastComputedTotal: total });
-+        console.log(`[cron] Sent upcoming-due email to ${loan.email} (${daysLeft} day(s) left)`);
-+      } else if (diffDays === 0 && loan.dueReminderSentOn !== todayStr()) {
-         // Due exactly today
-         const { months, interest, total } = precheck;
-         const remaining = Math.round((total - amountPaid) * 100) / 100;
-@@ -88,10 +114,15 @@ async function runDailyCheck() {
++- `DATABASE_URL` — your Neon connection string (Neon dashboard → Connection Details).
+ - `BREVO_API_KEY` — from [Brevo](https://app.brevo.com) → SMTP & API → API Keys.
+ - `SENDER_EMAIL` — the address emails will be sent *from*. It must be a
+   verified sender in your Brevo account.
+@@ -41,11 +51,13 @@ Open `.env` and set:
+ - `DASHBOARD_PASSWORD` — a simple password so random people can't open your
+   dashboard if you ever host it somewhere public. Leave blank to disable.
+ - `PORT` — which port to run on (default 3000).
+-- `CHECK_HOUR` — the hour (0–23) the automated daily check runs, server time.
++- `CHECK_HOUR` — the hour (0–23, IST) the automated daily check runs.
++- `UPCOMING_REMINDER_DAYS` — how many days before the due date to start sending
++  daily "upcoming" reminders (default 3).
+ - `OVERDUE_REMINDER_GAP_DAYS` — how many days to wait between repeated overdue
+   emails, so a borrower isn't emailed every single day.
  
- function startCron() {
-   const hour = Number(process.env.CHECK_HOUR || 9);
--  // Runs every day at the configured hour, minute 0.
-+  // Runs every day at the configured hour, minute 0, in IST - not server local time.
-+  // (Render's containers run in UTC, so without this "0 9 * * *" would actually
-+  // fire at 9:00 UTC = 2:30 PM IST.) This only matters if the process happens to
-+  // be alive at that exact minute; on the free tier the GitHub Action that calls
-+  // POST /api/run-check is the real trigger - this is just a backup for whenever
-+  // the app is awake anyway (e.g. if you upgrade off the free tier later).
-   const expression = `0 ${hour} * * *`;
--  cron.schedule(expression, runDailyCheck);
--  console.log(`[cron] Scheduled daily check for ${hour}:00 server time (expression: "${expression}")`);
-+  cron.schedule(expression, runDailyCheck, { timezone: 'Asia/Kolkata' });
-+  console.log(`[cron] Scheduled daily check for ${hour}:00 IST (expression: "${expression}")`);
+-## 3. Run
++## 4. Run
+ 
+ ```bash
+ npm start
+@@ -68,21 +80,23 @@ The ledger then shows, live, how much is owed today (principal + interest
+ accrued so far) for every entry — updated automatically without you doing
+ any math.
+ 
+-## 4. Keep it running
++If someone's already in the ledger and takes another loan, start typing their
++name in **+ New entry** — it autocompletes from existing borrowers and fills
++in their email for you. Use the search box above the ledger to pull up
++everyone under one name at once.
+ 
+-The daily email check only happens while the server (`npm start`) is
+-running. For a personal project, the simplest options are:
++## 5. Keep it running on Render's free tier
+ 
+-- Leave your computer/server running with the app open in a terminal.
+-- Use a process manager like [pm2](https://pm2.keymetrics.io/) so it
+-  restarts automatically:
+-  ```bash
+-  npm install -g pm2
+-  pm2 start server.js --name ledger
+-  pm2 save
+-  ```
+-- Deploy it to a small always-on host (Render, Railway, a cheap VPS, etc.)
+-  and set the same environment variables there.
++Render's free tier spins the app down after periods of inactivity, so it won't
++be awake on its own at 9 AM to run the daily check. `.github/workflows/daily-render.yml`
++handles this: it runs on GitHub's own schedule (free, independent of Render),
++polls `/api/health` until Render finishes waking up, then calls
++`POST /api/run-check` to run the same check the in-app cron would. It also
++reruns 15 minutes later as a safety net in case the first attempt hit a slow
++cold start. The Render URL is hardcoded in the workflow file itself (update it
++there if you ever redeploy to a new URL); the only thing that needs to be set
++is the `DASHBOARD_PASSWORD` secret under the repo's Settings → Secrets and
++variables → Actions, matching whatever you set in `.env` on Render.
+ 
+ ## How interest is calculated
+ 
+@@ -97,6 +111,23 @@ total due = principal + interest
+ This recalculates fresh every time the dashboard loads and every time an
+ email goes out, so the amount always reflects "as of today."
+ 
++## Editing an entry
++
++Click ✎ to open the same form pre-filled with everything for that loan —
++name, email, amount, rate, dates, and amount paid so far — and save your
++corrections. Edits are validated the same way new entries are (amount must
++be positive, due date can't be before the start date, etc.).
++
++## Continuing a loan (renewals)
++
++If a borrower pays this period's interest and you're both continuing the
++debt into the next month rather than closing it out, click ⟳ **Renew**. You
++enter how much interest was paid (optional) and a new repayment date — it
++records the payment, moves the due date forward, and the status badge shows
++**"continuing"** instead of pending/overdue. Reminder emails pick back up
++relative to the new due date. If a renewed loan later passes its new due
++date too without being renewed again, it goes back to showing "overdue".
++
+ ## Marking a loan as paid
+ 
+ Click the ✓ button next to an entry once the borrower has repaid you. This
+@@ -113,13 +144,15 @@ are sending correctly before relying on the automation.
+ 
+ ```
+ loan-tracker/
+-├── server.js        # Express server + API routes
+-├── cron.js          # Daily automated check (the "brain")
++├── server.js         # Express server + API routes
++├── cron.js           # Daily automated check (the "brain")
+ ├── interest.js       # Interest math
+-├── brevo.js         # Sends emails via Brevo's API
++├── brevo.js          # Sends emails via Brevo's API
+ ├── templates.js      # Email HTML content
+-├── store.js          # Reads/writes data/loans.json
+-├── data/loans.json   # Your data — the only "database"
++├── store.js          # Reads/writes Postgres (Neon)
++├── db.js             # Postgres connection pool
++├── schema.sql        # Run once (and after updates) to set up/migrate the table
++├── .github/workflows/daily-render.yml  # Wakes Render + triggers the daily check
+ ├── public/           # The dashboard (HTML/CSS/JS)
+-└── .env               # Your secrets (not committed to git)
++└── .env              # Your secrets (not committed to git)
+ ```
+diff --git a/public/app.js b/public/app.js
+index 8f716fe..eb99110 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -13,10 +13,23 @@ const cancelFormBtn = document.getElementById('cancelFormBtn');
+ const formOverlay = document.getElementById('formOverlay');
+ const loanForm = document.getElementById('loanForm');
+ const formError = document.getElementById('formError');
++const formTitle = document.getElementById('formTitle');
++const amountPaidField = document.getElementById('amountPaidField');
++const borrowerListEl = document.getElementById('borrowerList');
++const borrowerFilter = document.getElementById('borrowerFilter');
+ const ledgerBody = document.getElementById('ledgerBody');
+ const summaryRow = document.getElementById('summaryRow');
+ const runCheckBtn = document.getElementById('runCheckBtn');
+ 
++// Holds the last loaded loans so click handlers (edit/renew) and the search
++// box can work off the same data without re-fetching.
++let currentLoans = [];
++// Name -> email, built from existing entries, used to autofill the form
++// when you pick a borrower who's already in the ledger.
++let borrowerEmailByName = new Map();
++// null = the form is creating a new entry; otherwise the id being edited.
++let editingLoanId = null;
++
+ function fmtMoney(n) {
+   return '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+ }
+@@ -25,6 +38,14 @@ function fmtDate(d) {
+   return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
  }
  
- module.exports = { startCron, runDailyCheck };
++// Adds `months` calendar months to a YYYY-MM-DD date string and returns the
++// result in the same format. Used only to suggest a default renew date.
++function addMonths(dateStr, months) {
++  const d = new Date(dateStr);
++  d.setMonth(d.getMonth() + months);
++  return d.toISOString().slice(0, 10);
++}
++
+ async function api(path, options = {}) {
+   const res = await fetch(path, {
+     ...options,
+@@ -71,16 +92,48 @@ unlockBtn.addEventListener('click', async () => {
+ });
+ passwordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlockBtn.click(); });
+ 
+-openFormBtn.addEventListener('click', () => {
++function openFormForCreate() {
++  editingLoanId = null;
+   loanForm.reset();
+   formError.textContent = '';
++  formTitle.textContent = 'New ledger entry';
++  amountPaidField.classList.add('hidden');
+   const today = new Date().toISOString().slice(0, 10);
+   loanForm.startDate.value = today;
+   formOverlay.classList.remove('hidden');
+-});
++  loanForm.name.focus();
++}
++
++function openFormForEdit(loan) {
++  editingLoanId = loan.id;
++  formError.textContent = '';
++  formTitle.textContent = 'Edit ledger entry';
++  loanForm.name.value = loan.name;
++  loanForm.email.value = loan.email;
++  loanForm.principal.value = loan.principal;
++  loanForm.monthlyRate.value = loan.monthlyRate;
++  loanForm.startDate.value = loan.startDate;
++  loanForm.dueDate.value = loan.dueDate;
++  loanForm.amountPaid.value = loan.amountPaid || 0;
++  amountPaidField.classList.remove('hidden');
++  formOverlay.classList.remove('hidden');
++  loanForm.name.focus();
++}
++
++openFormBtn.addEventListener('click', openFormForCreate);
+ cancelFormBtn.addEventListener('click', () => formOverlay.classList.add('hidden'));
+ formOverlay.addEventListener('click', (e) => { if (e.target === formOverlay) formOverlay.classList.add('hidden'); });
+ 
++// Picking (or typing) a name that already exists in the ledger auto-fills
++// their email, so a repeat borrower doesn't need to be retyped from scratch.
++loanForm.name.addEventListener('input', () => {
++  if (editingLoanId) return; // don't clobber an edit in progress
++  const match = borrowerEmailByName.get(loanForm.name.value.trim());
++  if (match && !loanForm.email.value.trim()) {
++    loanForm.email.value = match;
++  }
++});
++
+ loanForm.addEventListener('submit', async (e) => {
+   e.preventDefault();
+   formError.textContent = '';
+@@ -88,13 +141,23 @@ loanForm.addEventListener('submit', async (e) => {
+   data.principal = Number(data.principal);
+   data.monthlyRate = Number(data.monthlyRate);
+ 
++  if (editingLoanId) {
++    data.amountPaid = Number(data.amountPaid || 0);
++  } else {
++    delete data.amountPaid; // new entries always start at 0, set server-side
++  }
++
+   if (new Date(data.dueDate) < new Date(data.startDate)) {
+     formError.textContent = 'Due date must be on or after the date lent.';
+     return;
+   }
+ 
+   try {
+-    await api('/api/loans', { method: 'POST', body: JSON.stringify(data) });
++    if (editingLoanId) {
++      await api(`/api/loans/${editingLoanId}`, { method: 'PATCH', body: JSON.stringify(data) });
++    } else {
++      await api('/api/loans', { method: 'POST', body: JSON.stringify(data) });
++    }
+     formOverlay.classList.add('hidden');
+     loadLoans();
+   } catch (err) {
+@@ -113,6 +176,8 @@ runCheckBtn.addEventListener('click', async () => {
+   setTimeout(() => (runCheckBtn.textContent = 'Run check now (test)'), 2000);
+ });
+ 
++borrowerFilter.addEventListener('input', () => renderLoans(currentLoans));
++
+ async function markPaid(id, paid) {
+   await api(`/api/loans/${id}`, { method: 'PATCH', body: JSON.stringify({ status: paid ? 'paid' : 'pending' }) });
+   loadLoans();
+@@ -144,19 +209,61 @@ async function recordPayment(id) {
+   }
+ }
+ 
++function editLoan(id) {
++  const loan = currentLoans.find((l) => l.id === id);
++  if (!loan) return;
++  openFormForEdit(loan);
++}
++
++// Debtor paid this period's interest and is continuing the debt to next
++// month - record the interest received and push the due date forward,
++// instead of letting it sit flagged as overdue.
++async function renewLoan(id) {
++  const loan = currentLoans.find((l) => l.id === id);
++  if (!loan) return;
++
++  const interestInput = prompt('Interest paid now (₹)? Leave blank if none was paid:', '');
++  if (interestInput === null) return; // cancelled
++  const interestPaid = interestInput.trim() === '' ? 0 : Number(interestInput);
++  if (isNaN(interestPaid) || interestPaid < 0) {
++    alert('Enter a valid amount (0 or more).');
++    return;
++  }
++
++  const suggestedDueDate = addMonths(loan.dueDate, 1);
++  const newDueDate = prompt('New repayment date (YYYY-MM-DD):', suggestedDueDate);
++  if (newDueDate === null) return; // cancelled
++  if (isNaN(Date.parse(newDueDate))) {
++    alert("That doesn't look like a valid date - use YYYY-MM-DD.");
++    return;
++  }
++
++  try {
++    await api(`/api/loans/${id}/renew`, { method: 'POST', body: JSON.stringify({ interestPaid, newDueDate }) });
++    loadLoans();
++  } catch (err) {
++    alert(err.message);
++  }
++}
++
+ async function removeLoan(id) {
+   if (!confirm('Delete this ledger entry? This cannot be undone.')) return;
+   await api(`/api/loans/${id}`, { method: 'DELETE' });
+   loadLoans();
+ }
+ 
++// "continuing" only shows while the renewed schedule is still being honored -
++// if a renewed loan blows past its (new) due date too, it goes back to
++// "overdue" since that's a fresh problem needing attention again.
+ function statusFor(loan) {
+   if (loan.status === 'paid') return 'paid';
+   const due = new Date(loan.dueDate);
+   const today = new Date();
+   due.setHours(0, 0, 0, 0);
+   today.setHours(0, 0, 0, 0);
+-  return today > due ? 'overdue' : 'pending';
++  if (today > due) return 'overdue';
++  if (loan.renewalCount > 0) return 'continuing';
++  return 'pending';
+ }
+ 
+ function renderSummary(loans) {
+@@ -180,19 +287,40 @@ function renderSummary(loans) {
+   `;
+ }
+ 
++// Rebuilds the name -> email map and the <datalist> options used by the
++// "New entry" form's autocomplete, from whatever is currently in the ledger.
++function updateBorrowerDirectory(loans) {
++  const seen = new Map();
++  loans.forEach((l) => { if (!seen.has(l.name)) seen.set(l.name, l.email); });
++  borrowerEmailByName = seen;
++  borrowerListEl.innerHTML = Array.from(seen.keys())
++    .map((n) => `<option value="${escapeHtml(n)}"></option>`)
++    .join('');
++}
++
+ function renderLoans(loans) {
++  const query = borrowerFilter.value.trim().toLowerCase();
++  const visible = query
++    ? loans.filter((l) => l.name.toLowerCase().includes(query) || l.email.toLowerCase().includes(query))
++    : loans;
++
+   if (loans.length === 0) {
+     ledgerBody.innerHTML = '<p class="empty-state">No entries yet. Add someone above and the ledger will start tracking them automatically.</p>';
+     return;
+   }
++  if (visible.length === 0) {
++    ledgerBody.innerHTML = '<p class="empty-state">No borrowers match that search.</p>';
++    return;
++  }
+ 
+-  ledgerBody.innerHTML = loans
++  ledgerBody.innerHTML = visible
+     .slice()
+     .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
+     .map((loan) => {
+       const status = statusFor(loan);
+       const remaining = loan.computed.remaining;
+       const paid = loan.computed.paid;
++      const isPaid = loan.status === 'paid';
+       return `
+       <div class="ledger-row">
+         <span data-label="Borrower" class="name">${escapeHtml(loan.name)}<span class="email">${escapeHtml(loan.email)}</span></span>
+@@ -203,9 +331,11 @@ function renderLoans(loans) {
+         <span data-label="Remaining" class="total ${remaining <= 0 ? 'cleared' : ''}">${fmtMoney(remaining)}</span>
+         <span data-label="Status"><span class="badge ${status}">${status}</span></span>
+         <span class="row-actions">
+-          <button class="icon-btn" title="Email this person now" onclick="sendEmailNow('${loan.id}')" ${loan.status === 'paid' ? 'disabled' : ''}>✉</button>
+-          <button class="icon-btn" title="Record a payment" onclick="recordPayment('${loan.id}')" ${loan.status === 'paid' ? 'disabled' : ''}>₹+</button>
+-          <button class="icon-btn" title="${loan.status === 'paid' ? 'Mark unpaid' : 'Mark fully paid'}" onclick="markPaid('${loan.id}', ${loan.status !== 'paid'})">${loan.status === 'paid' ? '↺' : '✓'}</button>
++          <button class="icon-btn" title="Edit entry" onclick="editLoan('${loan.id}')">✎</button>
++          <button class="icon-btn" title="Renew — record interest paid and continue to next month" onclick="renewLoan('${loan.id}')" ${isPaid ? 'disabled' : ''}>⟳</button>
++          <button class="icon-btn" title="Email this person now" onclick="sendEmailNow('${loan.id}')" ${isPaid ? 'disabled' : ''}>✉</button>
++          <button class="icon-btn" title="Record a payment" onclick="recordPayment('${loan.id}')" ${isPaid ? 'disabled' : ''}>₹+</button>
++          <button class="icon-btn" title="${isPaid ? 'Mark unpaid' : 'Mark fully paid'}" onclick="markPaid('${loan.id}', ${!isPaid})">${isPaid ? '↺' : '✓'}</button>
+           <button class="icon-btn" title="Delete" onclick="removeLoan('${loan.id}')">✕</button>
+         </span>
+       </div>
+@@ -223,6 +353,8 @@ function escapeHtml(str) {
+ async function loadLoans() {
+   try {
+     const loans = await api('/api/loans');
++    currentLoans = loans;
++    updateBorrowerDirectory(loans);
+     renderSummary(loans);
+     renderLoans(loans);
+   } catch (err) {
+@@ -243,4 +375,6 @@ if (DASH_PASSWORD) {
+ window.markPaid = markPaid;
+ window.removeLoan = removeLoan;
+ window.recordPayment = recordPayment;
+-window.sendEmailNow = sendEmailNow;
 \ No newline at end of file
++window.sendEmailNow = sendEmailNow;
++window.editLoan = editLoan;
++window.renewLoan = renewLoan;
+diff --git a/public/index.html b/public/index.html
+index 1a9fa10..1ac85dc 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -36,6 +36,10 @@
+     <main>
+       <section class="summary-row" id="summaryRow"></section>
+ 
++      <div class="ledger-toolbar">
++        <input type="search" id="borrowerFilter" placeholder="Search by borrower name or email…" />
++      </div>
++
+       <section class="ledger-wrap">
+         <div class="ledger-head">
+           <span>Borrower</span>
+@@ -61,10 +65,11 @@
+ 
+   <div id="formOverlay" class="overlay hidden">
+     <form id="loanForm" class="loan-form">
+-      <h2>New ledger entry</h2>
++      <h2 id="formTitle">New ledger entry</h2>
+ 
+       <label>Borrower's name
+-        <input type="text" name="name" required placeholder="e.g. Priya Sharma" />
++        <input type="text" name="name" required placeholder="e.g. Priya Sharma" list="borrowerList" autocomplete="off" />
++        <datalist id="borrowerList"></datalist>
+       </label>
+ 
+       <label>Borrower's email
+@@ -87,6 +92,10 @@
+         <input type="date" name="dueDate" required />
+       </label>
+ 
++      <label id="amountPaidField" class="hidden">Amount paid so far (₹)
++        <input type="number" name="amountPaid" min="0" step="0.01" placeholder="0" />
++      </label>
++
+       <div class="form-actions">
+         <button type="button" id="cancelFormBtn" class="btn-ghost">Cancel</button>
+         <button type="submit" class="btn-primary">Save entry</button>
+diff --git a/public/styles.css b/public/styles.css
+index 1302336..4ea9dce 100644
+--- a/public/styles.css
++++ b/public/styles.css
+@@ -10,6 +10,7 @@
+   --red-bg: #F7E7E3;
+   --green-bg: #E7EFE4;
+   --green: #3B6B3E;
++  --teal-bg: #E3EEEF;
+   --radius: 6px;
+   --font-display: 'Fraunces', Georgia, serif;
+   --font-body: 'Inter', -apple-system, sans-serif;
+@@ -167,6 +168,18 @@ body {
+ .summary-card.overdue .value { color: var(--red); }
+ 
+ /* ---------- Ledger table ---------- */
++.ledger-toolbar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
++.ledger-toolbar input {
++  width: 100%;
++  max-width: 260px;
++  padding: 8px 12px;
++  border: 1px solid var(--paper-line);
++  border-radius: var(--radius);
++  font-family: var(--font-body);
++  font-size: 13px;
++  background: #fffdf8;
++  color: var(--ink);
++}
+ .ledger-wrap { background: #fffdf8; border: 1px solid var(--paper-line); border-radius: var(--radius); overflow: hidden; }
+ 
+ .ledger-head, .ledger-row {
+@@ -208,8 +221,9 @@ body {
+ .badge.pending { background: #F1EADA; color: var(--gold); }
+ .badge.overdue { background: var(--red-bg); color: var(--red); }
+ .badge.paid { background: var(--green-bg); color: var(--green); }
++.badge.continuing { background: var(--teal-bg); color: var(--teal); }
+ 
+-.row-actions { display: flex; gap: 6px; justify-content: flex-end; }
++.row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+ .icon-btn {
+   background: none;
+   border: none;
 diff --git a/schema.sql b/schema.sql
-index acb8c50..9e69f50 100644
+index 87534f5..e797cc4 100644
 --- a/schema.sql
 +++ b/schema.sql
-@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS loans (
-   status                 TEXT NOT NULL DEFAULT 'pending',
-   amount_paid            NUMERIC(12, 2) NOT NULL DEFAULT 0,
-   due_reminder_sent_on   DATE,
-+  last_upcoming_reminder_on DATE,
-   last_overdue_email_on  DATE,
+@@ -18,12 +18,15 @@ CREATE TABLE IF NOT EXISTS loans (
    last_computed_total    NUMERIC(12, 2),
    last_payment_on        DATE,
-@@ -22,3 +23,7 @@ CREATE TABLE IF NOT EXISTS loans (
+   last_manual_email_on   TIMESTAMPTZ,
++  renewal_count          INTEGER NOT NULL DEFAULT 0,
++  last_renewed_on        DATE,
+   created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+ );
  
  CREATE INDEX IF NOT EXISTS idx_loans_status ON loans (status);
  CREATE INDEX IF NOT EXISTS idx_loans_due_date ON loans (due_date);
-+
-+-- Migration: if your table already existed before this column was added,
-+-- this line adds it without touching anything else. Safe to run any number of times.
+ 
+--- Migration: if your table already existed before this column was added,
+--- this line adds it without touching anything else. Safe to run any number of times.
+-ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_upcoming_reminder_on DATE;
+\ No newline at end of file
++-- Migrations: safe to run any number of times against an existing table.
 +ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_upcoming_reminder_on DATE;
++ALTER TABLE loans ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
++ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_renewed_on DATE;
+\ No newline at end of file
+diff --git a/server.js b/server.js
+index c1737c7..197c255 100644
+--- a/server.js
++++ b/server.js
+@@ -14,6 +14,7 @@ const {
+   loanCreatedEmail,
+   loanReopenedEmail,
+   loanDeletedEmail,
++  loanRenewedEmail,
+ } = require('./templates');
+ 
+ // Every action on a loan sends mail. This one helper does the actual send + logging
+@@ -74,6 +75,42 @@ function notifyLoanDeleted(loan) {
+   return notify(loan, { subject, htmlContent }, 'deleted');
+ }
+ 
++function notifyLoanRenewed(loan, { interestPaid, remaining, newDueDate }) {
++  const { subject, htmlContent } = loanRenewedEmail({
++    name: loan.name,
++    principal: loan.principal,
++    monthlyRate: loan.monthlyRate,
++    interestPaid,
++    remaining,
++    newDueDate,
++    lenderName: process.env.SENDER_NAME || 'Your Lender',
++  });
++  return notify(loan, { subject, htmlContent }, 'renewed');
++}
++
++// Shared validation for anything that edits loan fields directly (PATCH / renew).
++// `before` is the existing loan row, used so a partial edit (e.g. only dueDate)
++// is still checked against the field it wasn't given.
++function validateLoanEdits(body, before) {
++  const errors = [];
++  if ('name' in body && !String(body.name).trim()) errors.push('name cannot be empty');
++  if ('email' in body && !String(body.email).trim()) errors.push('email cannot be empty');
++  if ('principal' in body && !(Number(body.principal) > 0)) errors.push('principal must be greater than 0');
++  if ('monthlyRate' in body && Number(body.monthlyRate) < 0) errors.push('monthlyRate cannot be negative');
++  if ('amountPaid' in body && Number(body.amountPaid) < 0) errors.push('amountPaid cannot be negative');
++  if ('startDate' in body && isNaN(Date.parse(body.startDate))) errors.push('startDate is not a valid date');
++  if ('dueDate' in body && isNaN(Date.parse(body.dueDate))) errors.push('dueDate is not a valid date');
++  if ('status' in body && !['pending', 'paid'].includes(body.status)) errors.push("status must be 'pending' or 'paid'");
++
++  const effectiveStart = 'startDate' in body ? body.startDate : before.startDate;
++  const effectiveDue = 'dueDate' in body ? body.dueDate : before.dueDate;
++  if (effectiveStart && effectiveDue && !isNaN(Date.parse(effectiveStart)) && !isNaN(Date.parse(effectiveDue))
++      && new Date(effectiveDue) < new Date(effectiveStart)) {
++    errors.push('dueDate cannot be before startDate');
++  }
++  return errors;
++}
++
+ const app = express();
+ app.use(express.json());
+ app.use(express.static(path.join(__dirname, 'public')));
+@@ -148,7 +185,19 @@ app.patch('/api/loans/:id', checkPassword, asyncRoute(async (req, res) => {
+   const before = loans.find((l) => l.id === req.params.id);
+   if (!before) return res.status(404).json({ error: 'Loan not found' });
+ 
+-  const updated = await updateLoan(req.params.id, req.body);
++  const errors = validateLoanEdits(req.body, before);
++  if (errors.length > 0) {
++    return res.status(400).json({ error: errors.join('; ') });
++  }
++
++  const edits = { ...req.body };
++  if ('name' in edits) edits.name = String(edits.name).trim();
++  if ('email' in edits) edits.email = String(edits.email).trim();
++  if ('principal' in edits) edits.principal = Number(edits.principal);
++  if ('monthlyRate' in edits) edits.monthlyRate = Number(edits.monthlyRate);
++  if ('amountPaid' in edits) edits.amountPaid = Number(edits.amountPaid);
++
++  const updated = await updateLoan(req.params.id, edits);
+   res.json(updated);
+ 
+   // If this update just transitioned the loan from unpaid -> paid, send a receipt email.
+@@ -204,6 +253,59 @@ app.post('/api/loans/:id/payments', checkPassword, asyncRoute(async (req, res) =
+   });
+ }));
+ 
++// POST renew a loan - borrower paid this period's interest and is continuing the
++// debt into a new period. Records the interest payment (if any), pushes the due
++// date forward, and marks the loan as "continuing" instead of pending/overdue.
++app.post('/api/loans/:id/renew', checkPassword, asyncRoute(async (req, res) => {
++  const loans = await readLoans();
++  const loan = loans.find((l) => l.id === req.params.id);
++  if (!loan) return res.status(404).json({ error: 'Loan not found' });
++  if (loan.status === 'paid') {
++    return res.status(400).json({ error: 'This loan is already marked as paid - reopen it first if you need to renew it.' });
++  }
++
++  const { newDueDate } = req.body;
++  const interestPaid = req.body.interestPaid !== undefined && req.body.interestPaid !== ''
++    ? Number(req.body.interestPaid)
++    : 0;
++
++  if (!newDueDate || isNaN(Date.parse(newDueDate))) {
++    return res.status(400).json({ error: 'newDueDate is required and must be a valid date' });
++  }
++  if (new Date(newDueDate) <= new Date(loan.dueDate)) {
++    return res.status(400).json({ error: 'newDueDate must be after the current due date' });
++  }
++  if (isNaN(interestPaid) || interestPaid < 0) {
++    return res.status(400).json({ error: 'interestPaid cannot be negative' });
++  }
++
++  const today = new Date().toISOString().slice(0, 10);
++  const newAmountPaid = Math.round(((loan.amountPaid || 0) + interestPaid) * 100) / 100;
++
++  const updates = {
++    amountPaid: newAmountPaid,
++    dueDate: newDueDate,
++    renewalCount: (loan.renewalCount || 0) + 1,
++    lastRenewedOn: today,
++    // New cycle - clear the reminder markers so upcoming/due-today/overdue
++    // emails fire again relative to the new due date instead of staying silent.
++    dueReminderSentOn: null,
++    lastUpcomingReminderOn: null,
++    lastOverdueEmailOn: null,
++  };
++  if (interestPaid > 0) {
++    updates.lastPaymentOn = today;
++  }
++
++  const updated = await updateLoan(loan.id, updates);
++  const { total } = calculateDue(updated.principal, updated.monthlyRate, updated.startDate);
++  const remaining = Math.max(0, Math.round((total - newAmountPaid) * 100) / 100);
++
++  res.json({ ...updated, computed: { total, paid: newAmountPaid, remaining } });
++
++  notifyLoanRenewed(updated, { interestPaid, remaining, newDueDate });
++}));
++
+ // POST send an email to this borrower right now, whenever you want, outside the daily automation
+ app.post('/api/loans/:id/send-email', checkPassword, asyncRoute(async (req, res) => {
+   const loans = await readLoans();
 diff --git a/store.js b/store.js
-index 9e8752f..a71b93e 100644
+index a71b93e..a3723e3 100644
 --- a/store.js
 +++ b/store.js
-@@ -15,6 +15,7 @@ const FIELD_MAP = {
-   status: 'status',
-   amountPaid: 'amount_paid',
-   dueReminderSentOn: 'due_reminder_sent_on',
-+  lastUpcomingReminderOn: 'last_upcoming_reminder_on',
-   lastOverdueEmailOn: 'last_overdue_email_on',
+@@ -20,6 +20,8 @@ const FIELD_MAP = {
    lastComputedTotal: 'last_computed_total',
    lastPaymentOn: 'last_payment_on',
-@@ -42,6 +43,7 @@ function rowToLoan(row) {
-     status: row.status,
-     amountPaid: Number(row.amount_paid || 0),
-     dueReminderSentOn: toDateStr(row.due_reminder_sent_on),
-+    lastUpcomingReminderOn: toDateStr(row.last_upcoming_reminder_on),
-     lastOverdueEmailOn: toDateStr(row.last_overdue_email_on),
+   lastManualEmailOn: 'last_manual_email_on',
++  renewalCount: 'renewal_count',
++  lastRenewedOn: 'last_renewed_on',
+ };
+ 
+ function toDateStr(value) {
+@@ -48,6 +50,8 @@ function rowToLoan(row) {
      lastComputedTotal: row.last_computed_total !== null ? Number(row.last_computed_total) : null,
      lastPaymentOn: toDateStr(row.last_payment_on),
+     lastManualEmailOn: row.last_manual_email_on ? row.last_manual_email_on.toISOString() : null,
++    renewalCount: Number(row.renewal_count || 0),
++    lastRenewedOn: toDateStr(row.last_renewed_on),
+     createdAt: row.created_at ? row.created_at.toISOString() : null,
+   };
+ }
 diff --git a/templates.js b/templates.js
-index 6e3ee57..8fd5512 100644
+index 8fd5512..4c22e24 100644
 --- a/templates.js
 +++ b/templates.js
-@@ -31,6 +31,27 @@ function dueTodayEmail({ name, principal, monthlyRate, months, interest, total,
+@@ -161,6 +161,31 @@ function loanReopenedEmail({ name, principal, monthlyRate, remaining, lenderName
    return { subject, htmlContent };
  }
  
-+function upcomingDueEmail({ name, principal, monthlyRate, months, interest, total, amountPaid, remaining, dueDate, daysLeft, lenderName }) {
-+  const owed = remaining !== undefined ? remaining : total;
-+  const subject = `Payment reminder: ₹${money(owed)} due in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
++function loanRenewedEmail({ name, principal, monthlyRate, interestPaid, remaining, newDueDate, lenderName }) {
++  const subject = `Ledger update: loan continued to ${newDueDate}`;
++  const interestLine = interestPaid > 0
++    ? `<tr><td style="padding:6px 0; color:#555;">Interest paid now</td><td style="padding:6px 0; text-align:right;">₹${money(interestPaid)}</td></tr>`
++    : '';
++  const interestParagraph = interestPaid > 0
++    ? `Thanks for paying <strong>₹${money(interestPaid)}</strong> in interest — `
++    : '';
 +  const htmlContent = `
 +    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: auto; color: #222;">
-+      <h2 style="color:#1a1a1a;">Upcoming Payment Reminder</h2>
++      <h2 style="color:#0f5257;">Loan Continued</h2>
 +      <p>Hi ${name},</p>
-+      <p>Just a heads up - your repayment of <strong>₹${money(owed)}</strong> is due on <strong>${dueDate}</strong>, which is <strong>${daysLeft} day${daysLeft === 1 ? '' : 's'}</strong> from now.</p>
++      <p>${interestParagraph}your loan of <strong>₹${money(principal)}</strong> (${monthlyRate}%/month interest) has been rolled over and continues into the next period.</p>
 +      <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
-+        <tr><td style="padding:6px 0; color:#555;">Original amount</td><td style="padding:6px 0; text-align:right;">₹${money(principal)}</td></tr>
-+        <tr><td style="padding:6px 0; color:#555;">Interest (${monthlyRate}%/month × ${months} month${months === 1 ? '' : 's'})</td><td style="padding:6px 0; text-align:right;">₹${money(interest)}</td></tr>
-+        ${paymentRow(amountPaid)}
-+        <tr style="border-top: 1px solid #ddd; font-weight:bold;"><td style="padding:8px 0;">Total due</td><td style="padding:8px 0; text-align:right;">₹${money(owed)}</td></tr>
++        ${interestLine}
++        <tr><td style="padding:6px 0; color:#555;">New repayment date</td><td style="padding:6px 0; text-align:right;">${newDueDate}</td></tr>
++        <tr style="border-top: 1px solid #ddd; font-weight:bold;"><td style="padding:8px 0;">Currently owed</td><td style="padding:8px 0; text-align:right;">₹${money(remaining)}</td></tr>
 +      </table>
-+      <p>No action needed if you're already planning to pay by then - just a friendly heads up.</p>
++      <p>You'll get the usual reminders as the new date approaches.</p>
 +      <p>Thanks,<br/>${lenderName}</p>
 +    </div>
 +  `;
 +  return { subject, htmlContent };
 +}
 +
- function overdueEmail({ name, principal, monthlyRate, months, interest, total, amountPaid, remaining, dueDate, daysOverdue, lenderName }) {
-   const owed = remaining !== undefined ? remaining : total;
-   const subject = `Overdue: ₹${money(owed)} payment is ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} late`;
-@@ -155,6 +176,7 @@ function loanDeletedEmail({ name, principal, lenderName }) {
- 
- module.exports = {
-   dueTodayEmail,
-+  upcomingDueEmail,
-   overdueEmail,
-   manualReminderEmail,
-   paymentReceiptEmail,
+ function loanDeletedEmail({ name, principal, lenderName }) {
+   const subject = `Ledger update: entry removed`;
+   const htmlContent = `
+@@ -183,5 +208,6 @@ module.exports = {
+   loanCreatedEmail,
+   loanReopenedEmail,
+   loanDeletedEmail,
++  loanRenewedEmail,
+   money,
+ };
+\ No newline at end of file
