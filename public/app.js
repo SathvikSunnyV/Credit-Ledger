@@ -298,6 +298,34 @@ function updateBorrowerDirectory(loans) {
     .join('');
 }
 
+// Orders loans so the same borrower's entries sit together (since they're the
+// same person with two separate agreements), while still surfacing whichever
+// group needs attention soonest first. Each loan stays a fully independent
+// row underneath - own status, own buttons - only the display is clustered.
+function orderForDisplay(loans) {
+  const groups = new Map();
+  loans.forEach((loan) => {
+    const key = loan.email.trim().toLowerCase();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(loan);
+  });
+
+  const groupList = Array.from(groups.values()).map((list) => {
+    list.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+    const unpaid = list.filter((l) => l.status !== 'paid');
+    const reference = unpaid.length > 0 ? unpaid : list;
+    const earliest = Math.min(...reference.map((l) => new Date(l.dueDate).getTime()));
+    return { earliest, list };
+  });
+  groupList.sort((a, b) => a.earliest - b.earliest);
+
+  const ordered = [];
+  groupList.forEach(({ list }) => {
+    list.forEach((loan, i) => ordered.push({ loan, isGroupStart: i === 0, groupSize: list.length }));
+  });
+  return ordered;
+}
+
 function renderLoans(loans) {
   const query = borrowerFilter.value.trim().toLowerCase();
   const visible = query
@@ -313,17 +341,16 @@ function renderLoans(loans) {
     return;
   }
 
-  ledgerBody.innerHTML = visible
-    .slice()
-    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
-    .map((loan) => {
+  ledgerBody.innerHTML = orderForDisplay(visible)
+    .map(({ loan, isGroupStart, groupSize }) => {
       const status = statusFor(loan);
       const remaining = loan.computed.remaining;
       const paid = loan.computed.paid;
       const isPaid = loan.status === 'paid';
+      const countBadge = isGroupStart && groupSize > 1 ? `<span class="loan-count">${groupSize} loans</span>` : '';
       return `
-      <div class="ledger-row">
-        <span data-label="Borrower" class="name">${escapeHtml(loan.name)}<span class="email">${escapeHtml(loan.email)}</span></span>
+      <div class="ledger-row ${isGroupStart ? '' : 'grouped'}">
+        <span data-label="Borrower" class="name">${escapeHtml(loan.name)}${countBadge}<span class="email">${escapeHtml(loan.email)}</span></span>
         <span data-label="Principal" class="amount">${fmtMoney(loan.principal)}</span>
         <span data-label="Rate">${loan.monthlyRate}%</span>
         <span data-label="Due">${fmtDate(loan.dueDate)}</span>
