@@ -14,6 +14,7 @@ const {
   loanCreatedEmail,
   loanReopenedEmail,
   loanDeletedEmail,
+  loanRenewedEmail,
 } = require('./templates');
 
 // Every action on a loan sends mail. This one helper does the actual send + logging
@@ -72,6 +73,42 @@ function notifyLoanDeleted(loan) {
     lenderName: process.env.SENDER_NAME || 'Your Lender',
   });
   return notify(loan, { subject, htmlContent }, 'deleted');
+}
+
+function notifyLoanRenewed(loan, { interestPaid, remaining, newDueDate }) {
+  const { subject, htmlContent } = loanRenewedEmail({
+    name: loan.name,
+    principal: loan.principal,
+    monthlyRate: loan.monthlyRate,
+    interestPaid,
+    remaining,
+    newDueDate,
+    lenderName: process.env.SENDER_NAME || 'Your Lender',
+  });
+  return notify(loan, { subject, htmlContent }, 'renewed');
+}
+
+// Shared validation for anything that edits loan fields directly (PATCH / renew).
+// `before` is the existing loan row, used so a partial edit (e.g. only dueDate)
+// is still checked against the field it wasn't given.
+function validateLoanEdits(body, before) {
+  const errors = [];
+  if ('name' in body && !String(body.name).trim()) errors.push('name cannot be empty');
+  if ('email' in body && !String(body.email).trim()) errors.push('email cannot be empty');
+  if ('principal' in body && !(Number(body.principal) > 0)) errors.push('principal must be greater than 0');
+  if ('monthlyRate' in body && Number(body.monthlyRate) < 0) errors.push('monthlyRate cannot be negative');
+  if ('amountPaid' in body && Number(body.amountPaid) < 0) errors.push('amountPaid cannot be negative');
+  if ('startDate' in body && isNaN(Date.parse(body.startDate))) errors.push('startDate is not a valid date');
+  if ('dueDate' in body && isNaN(Date.parse(body.dueDate))) errors.push('dueDate is not a valid date');
+  if ('status' in body && !['pending', 'paid'].includes(body.status)) errors.push("status must be 'pending' or 'paid'");
+
+  const effectiveStart = 'startDate' in body ? body.startDate : before.startDate;
+  const effectiveDue = 'dueDate' in body ? body.dueDate : before.dueDate;
+  if (effectiveStart && effectiveDue && !isNaN(Date.parse(effectiveStart)) && !isNaN(Date.parse(effectiveDue))
+      && new Date(effectiveDue) < new Date(effectiveStart)) {
+    errors.push('dueDate cannot be before startDate');
+  }
+  return errors;
 }
 
 const app = express();
@@ -148,7 +185,19 @@ app.patch('/api/loans/:id', checkPassword, asyncRoute(async (req, res) => {
   const before = loans.find((l) => l.id === req.params.id);
   if (!before) return res.status(404).json({ error: 'Loan not found' });
 
-  const updated = await updateLoan(req.params.id, req.body);
+  const errors = validateLoanEdits(req.body, before);
+  if (errors.length > 0) {
+    return res.status(400).json({ error: errors.join('; ') });
+  }
+
+  const edits = { ...req.body };
+  if ('name' in edits) edits.name = String(edits.name).trim();
+  if ('email' in edits) edits.email = String(edits.email).trim();
+  if ('principal' in edits) edits.principal = Number(edits.principal);
+  if ('monthlyRate' in edits) edits.monthlyRate = Number(edits.monthlyRate);
+  if ('amountPaid' in edits) edits.amountPaid = Number(edits.amountPaid);
+
+  const updated = await updateLoan(req.params.id, edits);
   res.json(updated);
 
   // If this update just transitioned the loan from unpaid -> paid, send a receipt email.
@@ -202,6 +251,59 @@ app.post('/api/loans/:id/payments', checkPassword, asyncRoute(async (req, res) =
     totalPaid: newPaid,
     remaining: Math.max(0, remaining),
   });
+}));
+
+// POST renew a loan - borrower paid this period's interest and is continuing the
+// debt into a new period. Records the interest payment (if any), pushes the due
+// date forward, and marks the loan as "continuing" instead of pending/overdue.
+app.post('/api/loans/:id/renew', checkPassword, asyncRoute(async (req, res) => {
+  const loans = await readLoans();
+  const loan = loans.find((l) => l.id === req.params.id);
+  if (!loan) return res.status(404).json({ error: 'Loan not found' });
+  if (loan.status === 'paid') {
+    return res.status(400).json({ error: 'This loan is already marked as paid - reopen it first if you need to renew it.' });
+  }
+
+  const { newDueDate } = req.body;
+  const interestPaid = req.body.interestPaid !== undefined && req.body.interestPaid !== ''
+    ? Number(req.body.interestPaid)
+    : 0;
+
+  if (!newDueDate || isNaN(Date.parse(newDueDate))) {
+    return res.status(400).json({ error: 'newDueDate is required and must be a valid date' });
+  }
+  if (new Date(newDueDate) <= new Date(loan.dueDate)) {
+    return res.status(400).json({ error: 'newDueDate must be after the current due date' });
+  }
+  if (isNaN(interestPaid) || interestPaid < 0) {
+    return res.status(400).json({ error: 'interestPaid cannot be negative' });
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const newAmountPaid = Math.round(((loan.amountPaid || 0) + interestPaid) * 100) / 100;
+
+  const updates = {
+    amountPaid: newAmountPaid,
+    dueDate: newDueDate,
+    renewalCount: (loan.renewalCount || 0) + 1,
+    lastRenewedOn: today,
+    // New cycle - clear the reminder markers so upcoming/due-today/overdue
+    // emails fire again relative to the new due date instead of staying silent.
+    dueReminderSentOn: null,
+    lastUpcomingReminderOn: null,
+    lastOverdueEmailOn: null,
+  };
+  if (interestPaid > 0) {
+    updates.lastPaymentOn = today;
+  }
+
+  const updated = await updateLoan(loan.id, updates);
+  const { total } = calculateDue(updated.principal, updated.monthlyRate, updated.startDate);
+  const remaining = Math.max(0, Math.round((total - newAmountPaid) * 100) / 100);
+
+  res.json({ ...updated, computed: { total, paid: newAmountPaid, remaining } });
+
+  notifyLoanRenewed(updated, { interestPaid, remaining, newDueDate });
 }));
 
 // POST send an email to this borrower right now, whenever you want, outside the daily automation

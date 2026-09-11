@@ -18,12 +18,15 @@ CREATE TABLE IF NOT EXISTS loans (
   last_computed_total    NUMERIC(12, 2),
   last_payment_on        DATE,
   last_manual_email_on   TIMESTAMPTZ,
+  renewal_count          INTEGER NOT NULL DEFAULT 0,
+  last_renewed_on        DATE,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans (status);
 CREATE INDEX IF NOT EXISTS idx_loans_due_date ON loans (due_date);
 
--- Migration: if your table already existed before this column was added,
--- this line adds it without touching anything else. Safe to run any number of times.
+-- Migrations: safe to run any number of times against an existing table.
 ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_upcoming_reminder_on DATE;
+ALTER TABLE loans ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_renewed_on DATE;

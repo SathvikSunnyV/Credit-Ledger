@@ -161,6 +161,31 @@ function loanReopenedEmail({ name, principal, monthlyRate, remaining, lenderName
   return { subject, htmlContent };
 }
 
+function loanRenewedEmail({ name, principal, monthlyRate, interestPaid, remaining, newDueDate, lenderName }) {
+  const subject = `Ledger update: loan continued to ${newDueDate}`;
+  const interestLine = interestPaid > 0
+    ? `<tr><td style="padding:6px 0; color:#555;">Interest paid now</td><td style="padding:6px 0; text-align:right;">₹${money(interestPaid)}</td></tr>`
+    : '';
+  const interestParagraph = interestPaid > 0
+    ? `Thanks for paying <strong>₹${money(interestPaid)}</strong> in interest — `
+    : '';
+  const htmlContent = `
+    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: auto; color: #222;">
+      <h2 style="color:#0f5257;">Loan Continued</h2>
+      <p>Hi ${name},</p>
+      <p>${interestParagraph}your loan of <strong>₹${money(principal)}</strong> (${monthlyRate}%/month interest) has been rolled over and continues into the next period.</p>
+      <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+        ${interestLine}
+        <tr><td style="padding:6px 0; color:#555;">New repayment date</td><td style="padding:6px 0; text-align:right;">${newDueDate}</td></tr>
+        <tr style="border-top: 1px solid #ddd; font-weight:bold;"><td style="padding:8px 0;">Currently owed</td><td style="padding:8px 0; text-align:right;">₹${money(remaining)}</td></tr>
+      </table>
+      <p>You'll get the usual reminders as the new date approaches.</p>
+      <p>Thanks,<br/>${lenderName}</p>
+    </div>
+  `;
+  return { subject, htmlContent };
+}
+
 function loanDeletedEmail({ name, principal, lenderName }) {
   const subject = `Ledger update: entry removed`;
   const htmlContent = `
@@ -183,5 +208,6 @@ module.exports = {
   loanCreatedEmail,
   loanReopenedEmail,
   loanDeletedEmail,
+  loanRenewedEmail,
   money,
 };

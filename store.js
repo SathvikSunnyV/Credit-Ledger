@@ -20,6 +20,8 @@ const FIELD_MAP = {
   lastComputedTotal: 'last_computed_total',
   lastPaymentOn: 'last_payment_on',
   lastManualEmailOn: 'last_manual_email_on',
+  renewalCount: 'renewal_count',
+  lastRenewedOn: 'last_renewed_on',
 };
 
 function toDateStr(value) {
@@ -48,6 +50,8 @@ function rowToLoan(row) {
     lastComputedTotal: row.last_computed_total !== null ? Number(row.last_computed_total) : null,
     lastPaymentOn: toDateStr(row.last_payment_on),
     lastManualEmailOn: row.last_manual_email_on ? row.last_manual_email_on.toISOString() : null,
+    renewalCount: Number(row.renewal_count || 0),
+    lastRenewedOn: toDateStr(row.last_renewed_on),
     createdAt: row.created_at ? row.created_at.toISOString() : null,
   };
 }
