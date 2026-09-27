@@ -140,19 +140,71 @@ Click **"Run check now (test)"** at the bottom of the dashboard to manually
 trigger the same logic the daily cron job runs, so you can confirm emails
 are sending correctly before relying on the automation.
 
+## Balance Sheet tab
+
+A second tab, **Balance Sheet**, tracks one row per day: cash on hand, that
+day's debit/credit, a running total including what's still owed to you, plus
+free-form "source of credit", "today's transactions", and "other stored
+sources" entries — matching the paper ledger format.
+
+This is intentionally **not** stored in the Neon/Postgres database used for
+loans — it's plain JSON, kept completely separate from the loan tracker's
+data and code. It has two possible backends:
+
+### Recommended: GitHub Gist backend (free, and survives every redeploy)
+
+Render's disk is **ephemeral** — anything written to a local file is wiped
+on every redeploy, and (on the free plan) also when the service spins down
+after 15 minutes idle and spins back up. So instead of writing to Render's
+disk at all, the balance sheet can store its JSON inside a **GitHub Gist**
+and read/write it over the GitHub API. A gist and a personal access token
+are both free with no trial period, and a gist isn't part of Render's
+filesystem, so it's completely unaffected by redeploys/restarts/spin-downs.
+
+Setup (~2 minutes):
+
+1. Go to **[gist.github.com](https://gist.github.com)**, create a new gist,
+   name the file exactly `balance-sheet.json`, put `[]` as its content, and
+   save it as a **Secret** gist. Copy the gist's ID from the URL —
+   `github.com/<you>/<GIST_ID>`.
+2. Go to **[github.com/settings/tokens](https://github.com/settings/tokens)** →
+   *Generate new token* (classic) → tick only the **gist** scope → generate,
+   and copy the token.
+3. On Render: your service → **Environment** → add two variables:
+   - `GITHUB_TOKEN` = the token from step 2
+   - `GIST_ID` = the ID from step 1
+4. Redeploy (or it'll pick them up on the next deploy). The server logs
+   `Using GitHub Gist backend` on startup once this is active.
+
+That's it — balance sheet data now lives in the gist, not on Render's disk,
+so it survives redeploys, restarts, and free-tier spin-downs indefinitely,
+at no cost.
+
+### Fallback: local JSON file
+
+If `GITHUB_TOKEN`/`GIST_ID` aren't set, the server falls back to writing
+`data/balance-sheet.json` on local disk (same as before). This is fine for
+running the app locally. On Render **without** the Gist backend configured,
+this file **will** be wiped on every redeploy/restart — set up the Gist
+backend above for the hosted app, or attach a paid Render persistent disk
+and set `BALANCE_SHEET_DATA_DIR` to its mount path instead.
+
 ## Files
 
 ```
 loan-tracker/
-├── server.js         # Express server + API routes
-├── cron.js           # Daily automated check (the "brain")
-├── interest.js       # Interest math
-├── brevo.js          # Sends emails via Brevo's API
-├── templates.js      # Email HTML content
-├── store.js          # Reads/writes Postgres (Neon)
-├── db.js             # Postgres connection pool
-├── schema.sql        # Run once (and after updates) to set up/migrate the table
+├── server.js             # Express server + API routes
+├── cron.js               # Daily automated check (the "brain")
+├── interest.js           # Interest math
+├── brevo.js              # Sends emails via Brevo's API
+
+├── templates.js          # Email HTML content
+├── store.js              # Reads/writes Postgres (Neon) — loans only
+├── db.js                 # Postgres connection pool
+├── balanceSheetStore.js  # Reads/writes the JSON-file balance sheet (separate from loans)
+├── schema.sql            # Run once (and after updates) to set up/migrate the loans table
 ├── .github/workflows/daily-render.yml  # Wakes Render + triggers the daily check
-├── public/           # The dashboard (HTML/CSS/JS)
-└── .env              # Your secrets (not committed to git)
+├── public/               # The dashboard (HTML/CSS/JS)
+├── data/balance-sheet.json  # Balance sheet data (git-ignored, auto-created)
+└── .env                  # Your secrets (not committed to git)
 ```

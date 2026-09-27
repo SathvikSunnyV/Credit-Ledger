@@ -5,6 +5,12 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { readLoans, addLoan, updateLoan, deleteLoan } = require('./store');
+const {
+  listEntries: listBalanceSheetEntries,
+  addEntry: addBalanceSheetEntry,
+  updateEntry: updateBalanceSheetEntry,
+  deleteEntry: deleteBalanceSheetEntry,
+} = require('./balanceSheetStore');
 const { calculateDue, daysBetween } = require('./interest');
 const { startCron, runDailyCheck } = require('./cron');
 const { sendEmail } = require('./brevo');
@@ -355,6 +361,41 @@ app.delete('/api/loans/:id', checkPassword, asyncRoute(async (req, res) => {
 
   // Every removal gets an email too, so nothing happens silently.
   notifyLoanDeleted(loan);
+}));
+
+// --- Balance sheet (JSON-file backed, separate from the Postgres loan data) ---
+
+// GET all balance sheet entries, oldest date first
+app.get('/api/balance-sheet', checkPassword, asyncRoute(async (req, res) => {
+  const entries = await listBalanceSheetEntries();
+  res.json(entries);
+}));
+
+// POST a new balance sheet entry (one row per day, per the paper ledger format)
+app.post('/api/balance-sheet', checkPassword, asyncRoute(async (req, res) => {
+  const { date } = req.body;
+  if (!date || isNaN(Date.parse(date))) {
+    return res.status(400).json({ error: 'date is required and must be a valid date' });
+  }
+  const entry = await addBalanceSheetEntry(req.body);
+  res.status(201).json(entry);
+}));
+
+// PATCH edit an existing balance sheet entry
+app.patch('/api/balance-sheet/:id', checkPassword, asyncRoute(async (req, res) => {
+  if ('date' in req.body && (!req.body.date || isNaN(Date.parse(req.body.date)))) {
+    return res.status(400).json({ error: 'date must be a valid date' });
+  }
+  const updated = await updateBalanceSheetEntry(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'Balance sheet entry not found' });
+  res.json(updated);
+}));
+
+// DELETE a balance sheet entry
+app.delete('/api/balance-sheet/:id', checkPassword, asyncRoute(async (req, res) => {
+  const removed = await deleteBalanceSheetEntry(req.params.id);
+  if (!removed) return res.status(404).json({ error: 'Balance sheet entry not found' });
+  res.status(204).end();
 }));
 
 // Manually trigger the automated check right now (useful for testing)

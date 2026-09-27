@@ -378,3 +378,220 @@ window.recordPayment = recordPayment;
 window.sendEmailNow = sendEmailNow;
 window.editLoan = editLoan;
 window.renewLoan = renewLoan;
+
+// ===================================================================
+// Balance Sheet — separate tab, separate API (/api/balance-sheet),
+// backed by a JSON file on the server instead of Postgres. None of the
+// loan-tracker code above is touched by anything below.
+// ===================================================================
+
+const tabLedgerBtn = document.getElementById('tabLedgerBtn');
+const tabBalanceBtn = document.getElementById('tabBalanceBtn');
+const ledgerView = document.getElementById('ledgerView');
+const balanceView = document.getElementById('balanceView');
+const tabOnlyLedgerEls = document.querySelectorAll('.tab-only-ledger');
+const tabOnlyBalanceEls = document.querySelectorAll('.tab-only-balance');
+
+const openBalanceFormBtn = document.getElementById('openBalanceFormBtn');
+const cancelBalanceFormBtn = document.getElementById('cancelBalanceFormBtn');
+const balanceFormOverlay = document.getElementById('balanceFormOverlay');
+const balanceForm = document.getElementById('balanceForm');
+const balanceFormError = document.getElementById('balanceFormError');
+const balanceFormTitle = document.getElementById('balanceFormTitle');
+const balanceBody = document.getElementById('balanceBody');
+
+let currentBalanceEntries = [];
+let editingBalanceId = null;
+let balanceLoadedOnce = false;
+
+function switchTab(tab) {
+  const isLedger = tab === 'ledger';
+  tabLedgerBtn.classList.toggle('active', isLedger);
+  tabBalanceBtn.classList.toggle('active', !isLedger);
+  ledgerView.classList.toggle('hidden', !isLedger);
+  balanceView.classList.toggle('hidden', isLedger);
+  tabOnlyLedgerEls.forEach((el) => el.classList.toggle('hidden', !isLedger));
+  tabOnlyBalanceEls.forEach((el) => el.classList.toggle('hidden', isLedger));
+  if (!isLedger && !balanceLoadedOnce) {
+    balanceLoadedOnce = true;
+    loadBalanceEntries();
+  }
+}
+
+tabLedgerBtn.addEventListener('click', () => switchTab('ledger'));
+tabBalanceBtn.addEventListener('click', () => switchTab('balance'));
+
+// --- Dynamic "label × amount" list rows (source of credit / transactions / other sources) ---
+
+function addListRow(container, label = '', amount = '') {
+  const row = document.createElement('div');
+  row.className = 'list-row';
+  row.innerHTML = `
+    <input type="text" class="list-row-label" placeholder="Name / entity" value="${escapeHtml(label)}" />
+    <input type="number" class="list-row-amount" placeholder="Amount" step="0.01" value="${amount === '' ? '' : amount}" />
+    <button type="button" class="icon-btn remove-row-btn" title="Remove">✕</button>
+  `;
+  row.querySelector('.remove-row-btn').addEventListener('click', () => row.remove());
+  container.appendChild(row);
+}
+
+balanceForm.querySelectorAll('.list-field').forEach((field) => {
+  const rowsContainer = field.querySelector('.list-rows');
+  field.querySelector('.add-row-btn').addEventListener('click', () => addListRow(rowsContainer));
+});
+
+function readListField(fieldName) {
+  const field = balanceForm.querySelector(`.list-field[data-list="${fieldName}"]`);
+  return Array.from(field.querySelectorAll('.list-row')).map((row) => ({
+    label: row.querySelector('.list-row-label').value.trim(),
+    amount: Number(row.querySelector('.list-row-amount').value) || 0,
+  })).filter((item) => item.label || item.amount);
+}
+
+function fillListField(fieldName, items) {
+  const field = balanceForm.querySelector(`.list-field[data-list="${fieldName}"]`);
+  const rowsContainer = field.querySelector('.list-rows');
+  rowsContainer.innerHTML = '';
+  (items || []).forEach((item) => addListRow(rowsContainer, item.label, item.amount));
+}
+
+function clearAllListFields() {
+  balanceForm.querySelectorAll('.list-field .list-rows').forEach((el) => (el.innerHTML = ''));
+}
+
+// --- Form open/close ---
+
+// Total including receivables is derived, not typed in: debit is money
+// owed TO you, credit is money you owe / have taken on.
+function recalcBalanceTotal() {
+  const onHand = Number(balanceForm.presentOnHand.value) || 0;
+  const debit = Number(balanceForm.debit.value) || 0;
+  const credit = Number(balanceForm.credit.value) || 0;
+  balanceForm.totalIncludingReceivables.value = Math.round((onHand + debit - credit) * 100) / 100;
+}
+['presentOnHand', 'debit', 'credit'].forEach((name) => {
+  balanceForm[name].addEventListener('input', recalcBalanceTotal);
+});
+
+function openBalanceFormForCreate() {
+  editingBalanceId = null;
+  balanceForm.reset();
+  clearAllListFields();
+  balanceFormError.textContent = '';
+  balanceFormTitle.textContent = 'New balance sheet day';
+  balanceForm.date.value = new Date().toISOString().slice(0, 10);
+  recalcBalanceTotal();
+  balanceFormOverlay.classList.remove('hidden');
+  balanceForm.date.focus();
+}
+
+function openBalanceFormForEdit(entry) {
+  editingBalanceId = entry.id;
+  balanceFormError.textContent = '';
+  balanceFormTitle.textContent = 'Edit balance sheet day';
+  balanceForm.date.value = entry.date;
+  balanceForm.presentOnHand.value = entry.presentOnHand || 0;
+  balanceForm.debit.value = entry.debit || 0;
+  balanceForm.credit.value = entry.credit || 0;
+  recalcBalanceTotal();
+  fillListField('sourcesOfCredit', entry.sourcesOfCredit);
+  fillListField('todaysTransactions', entry.todaysTransactions);
+  fillListField('otherStoredSources', entry.otherStoredSources);
+  balanceFormOverlay.classList.remove('hidden');
+  balanceForm.date.focus();
+}
+
+openBalanceFormBtn.addEventListener('click', openBalanceFormForCreate);
+cancelBalanceFormBtn.addEventListener('click', () => balanceFormOverlay.classList.add('hidden'));
+balanceFormOverlay.addEventListener('click', (e) => {
+  if (e.target === balanceFormOverlay) balanceFormOverlay.classList.add('hidden');
+});
+
+balanceForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  balanceFormError.textContent = '';
+
+  const payload = {
+    date: balanceForm.date.value,
+    presentOnHand: Number(balanceForm.presentOnHand.value) || 0,
+    debit: Number(balanceForm.debit.value) || 0,
+    credit: Number(balanceForm.credit.value) || 0,
+    sourcesOfCredit: readListField('sourcesOfCredit'),
+    todaysTransactions: readListField('todaysTransactions'),
+    otherStoredSources: readListField('otherStoredSources'),
+  };
+
+  try {
+    if (editingBalanceId) {
+      await api(`/api/balance-sheet/${editingBalanceId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    } else {
+      await api('/api/balance-sheet', { method: 'POST', body: JSON.stringify(payload) });
+    }
+    balanceFormOverlay.classList.add('hidden');
+    loadBalanceEntries();
+  } catch (err) {
+    balanceFormError.textContent = err.message;
+  }
+});
+
+function editBalanceEntry(id) {
+  const entry = currentBalanceEntries.find((e) => e.id === id);
+  if (!entry) return;
+  openBalanceFormForEdit(entry);
+}
+
+async function removeBalanceEntry(id) {
+  if (!confirm('Delete this day from the balance sheet? This cannot be undone.')) return;
+  try {
+    await api(`/api/balance-sheet/${id}`, { method: 'DELETE' });
+    loadBalanceEntries();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+function fmtListItems(items) {
+  if (!items || items.length === 0) return '—';
+  return items.map((i) => `${escapeHtml(i.label || '—')}: ${fmtMoney(i.amount || 0)}`).join('<br>');
+}
+
+function renderBalanceEntries(entries) {
+  if (entries.length === 0) {
+    balanceBody.innerHTML = '<p class="empty-state">No days recorded yet. Add today\'s entry above.</p>';
+    return;
+  }
+
+  balanceBody.innerHTML = entries
+    .slice()
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)) // newest first
+    .map((entry) => `
+      <div class="balance-row">
+        <span data-label="Date" class="name">${fmtDate(entry.date)}</span>
+        <span data-label="Present on hand">${fmtMoney(entry.presentOnHand || 0)}</span>
+        <span data-label="Debit">${fmtMoney(entry.debit || 0)}</span>
+        <span data-label="Credit">${fmtMoney(entry.credit || 0)}</span>
+        <span data-label="Total incl. receivables" class="total">${fmtMoney(entry.totalIncludingReceivables || 0)}</span>
+        <span data-label="Source of credit" class="list-cell">${fmtListItems(entry.sourcesOfCredit)}</span>
+        <span data-label="Today's transactions" class="list-cell">${fmtListItems(entry.todaysTransactions)}</span>
+        <span data-label="Other stored sources" class="list-cell">${fmtListItems(entry.otherStoredSources)}</span>
+        <span class="row-actions">
+          <button class="icon-btn" title="Edit day" onclick="editBalanceEntry('${entry.id}')">✎</button>
+          <button class="icon-btn" title="Delete" onclick="removeBalanceEntry('${entry.id}')">✕</button>
+        </span>
+      </div>
+    `)
+    .join('');
+}
+
+async function loadBalanceEntries() {
+  try {
+    const entries = await api('/api/balance-sheet');
+    currentBalanceEntries = entries;
+    renderBalanceEntries(entries);
+  } catch (err) {
+    if (err.message !== 'unauthorized') console.error(err);
+  }
+}
+
+window.editBalanceEntry = editBalanceEntry;
+window.removeBalanceEntry = removeBalanceEntry;

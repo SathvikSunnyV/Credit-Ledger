@@ -30,36 +30,68 @@
           <p class="tagline">Who owes what, and when it's owed</p>
         </div>
       </div>
-      <button id="openFormBtn" class="btn-primary">+ New entry</button>
+      <button id="openFormBtn" class="btn-primary tab-only-ledger">+ New entry</button>
+      <button id="openBalanceFormBtn" class="btn-primary tab-only-balance hidden">+ New day</button>
     </header>
 
+    <nav class="tabs">
+      <button id="tabLedgerBtn" class="tab-btn active" type="button">Ledger</button>
+      <button id="tabBalanceBtn" class="tab-btn" type="button">Balance Sheet</button>
+    </nav>
+
     <main>
-      <section class="summary-row" id="summaryRow"></section>
+      <section id="ledgerView">
+        <section class="summary-row" id="summaryRow"></section>
 
-      <div class="ledger-toolbar">
-        <input type="search" id="borrowerFilter" placeholder="Search by borrower name or email…" />
-      </div>
+        <div class="ledger-toolbar">
+          <input type="search" id="borrowerFilter" placeholder="Search by borrower name or email…" />
+        </div>
 
-      <section class="ledger-wrap">
-        <div class="ledger-head">
-          <span>Borrower</span>
-          <span>Principal</span>
-          <span>Rate / mo</span>
-          <span>Due</span>
-          <span>Paid</span>
-          <span>Remaining</span>
-          <span>Status</span>
-          <span></span>
-        </div>
-        <div id="ledgerBody" class="ledger-body">
-          <p class="empty-state">No entries yet. Add someone above and the ledger will start tracking them automatically.</p>
-        </div>
+        <section class="ledger-wrap">
+          <div class="ledger-head">
+            <span>Borrower</span>
+            <span>Principal</span>
+            <span>Rate / mo</span>
+            <span>Due</span>
+            <span>Paid</span>
+            <span>Remaining</span>
+            <span>Status</span>
+            <span></span>
+          </div>
+          <div id="ledgerBody" class="ledger-body">
+            <p class="empty-state">No entries yet. Add someone above and the ledger will start tracking them automatically.</p>
+          </div>
+        </section>
+      </section>
+
+      <section id="balanceView" class="hidden">
+        <p class="balance-note">
+          One row per day: cash on hand, today's debit/credit, the running total including what's still
+          owed to you, and where today's credit came from.
+        </p>
+        <section class="balance-wrap">
+          <div class="balance-head">
+            <span>Date</span>
+            <span>Present on hand</span>
+            <span>Debit</span>
+            <span>Credit</span>
+            <span>Total incl. receivables</span>
+            <span>Source of credit</span>
+            <span>Today's transactions</span>
+            <span>Other stored sources</span>
+            <span></span>
+          </div>
+          <div id="balanceBody" class="balance-body">
+            <p class="empty-state">No days recorded yet. Add today's entry above.</p>
+          </div>
+        </section>
       </section>
     </main>
 
     <footer class="footnote">
-      Reminders and overdue alerts are sent automatically once a day by the server — nothing here needs to be triggered by hand.
-      <button id="runCheckBtn" class="btn-ghost">Run check now (test)</button>
+      <span class="tab-only-ledger">Reminders and overdue alerts are sent automatically once a day by the server — nothing here needs to be triggered by hand.
+      <button id="runCheckBtn" class="btn-ghost">Run check now (test)</button></span>
+      <span class="tab-only-balance hidden">Balance sheet entries are stored in a JSON file on the server, separate from the loan ledger above.</span>
     </footer>
   </div>
 
@@ -101,6 +133,57 @@
         <button type="submit" class="btn-primary">Save entry</button>
       </div>
       <p id="formError" class="form-error"></p>
+    </form>
+  </div>
+
+  <div id="balanceFormOverlay" class="overlay hidden">
+    <form id="balanceForm" class="loan-form balance-form">
+      <h2 id="balanceFormTitle">New balance sheet day</h2>
+
+      <label>Date
+        <input type="date" name="date" required />
+      </label>
+
+      <label>Present on hand (₹)
+        <input type="number" name="presentOnHand" step="0.01" placeholder="0" />
+      </label>
+
+      <label>Debit (₹)
+        <input type="number" name="debit" step="0.01" placeholder="0" />
+      </label>
+
+      <label>Credit (₹)
+        <input type="number" name="credit" step="0.01" placeholder="0" />
+      </label>
+
+      <label>Total including receivables (₹)
+        <input type="number" name="totalIncludingReceivables" step="0.01" readonly tabindex="-1" />
+        <span class="field-hint">Auto-calculated: present on hand + debit − credit</span>
+      </label>
+
+      <div class="list-field" data-list="sourcesOfCredit">
+        <p class="list-field-label">Source of credit × amount</p>
+        <div class="list-rows"></div>
+        <button type="button" class="btn-ghost small-btn add-row-btn">+ Add source</button>
+      </div>
+
+      <div class="list-field" data-list="todaysTransactions">
+        <p class="list-field-label">Today's transactions (entity × amount)</p>
+        <div class="list-rows"></div>
+        <button type="button" class="btn-ghost small-btn add-row-btn">+ Add transaction</button>
+      </div>
+
+      <div class="list-field" data-list="otherStoredSources">
+        <p class="list-field-label">Other stored sources</p>
+        <div class="list-rows"></div>
+        <button type="button" class="btn-ghost small-btn add-row-btn">+ Add source</button>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" id="cancelBalanceFormBtn" class="btn-ghost">Cancel</button>
+        <button type="submit" class="btn-primary">Save day</button>
+      </div>
+      <p id="balanceFormError" class="form-error"></p>
     </form>
   </div>
 

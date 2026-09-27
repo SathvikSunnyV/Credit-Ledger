@@ -290,6 +290,8 @@ body {
 }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
 .form-error { color: var(--red); font-size: 13px; margin-top: 10px; min-height: 16px; }
+.loan-form input[readonly] { background: var(--paper); color: var(--ink-soft); cursor: not-allowed; }
+.field-hint { display: block; margin-top: 4px; font-size: 11px; font-style: italic; color: var(--ink-soft); }
 
 @media (max-width: 720px) {
   .ledger-head { display: none; }
@@ -307,4 +309,89 @@ body {
     text-transform: uppercase;
   }
   .summary-row { grid-template-columns: 1fr; }
+}
+
+/* ---------- Tabs ---------- */
+.tabs { display: flex; gap: 6px; margin-bottom: 24px; }
+.tab-btn {
+  background: transparent;
+  border: 1px solid var(--paper-line);
+  border-bottom: none;
+  padding: 9px 18px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.tab-btn.active { background: #fffdf8; color: var(--teal-dark); border-color: var(--ink); }
+.tab-btn:hover { color: var(--ink); }
+
+/* ---------- Balance sheet table ---------- */
+.balance-note { color: var(--ink-soft); font-size: 13px; margin: 0 0 14px; }
+.balance-wrap { background: #fffdf8; border: 1px solid var(--paper-line); border-radius: var(--radius); overflow-x: auto; }
+
+.balance-head, .balance-row {
+  display: grid;
+  grid-template-columns: 0.9fr 1fr 0.8fr 0.8fr 1.1fr 1.3fr 1.3fr 1.3fr 0.7fr;
+  align-items: start;
+  padding: 14px 18px;
+  gap: 10px;
+  min-width: 920px;
+}
+.balance-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--ink);
+  font-weight: 600;
+  align-items: center;
+}
+.balance-row { border-bottom: 1px dashed var(--paper-line); font-size: 13px; }
+.balance-row:last-child { border-bottom: none; }
+.balance-row .name { font-weight: 600; }
+.balance-row .total { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--teal-dark); }
+.balance-row .list-cell { font-size: 12px; line-height: 1.5; color: var(--ink-soft); }
+.balance-row .row-actions { justify-content: flex-start; }
+
+/* ---------- Balance sheet form: dynamic label x amount rows ---------- */
+.balance-form { max-width: 480px; max-height: 86vh; overflow-y: auto; }
+.small-btn { margin-top: 6px; padding: 5px 10px; font-size: 12px; }
+.list-field { margin-bottom: 16px; }
+.list-field-label {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: 0 0 8px;
+}
+.list-rows { display: flex; flex-direction: column; gap: 6px; }
+.list-row { display: grid; grid-template-columns: 1.4fr 1fr auto; gap: 6px; align-items: center; }
+.list-row input {
+  padding: 8px 10px;
+  border: 1px solid var(--paper-line);
+  border-radius: var(--radius);
+  font-family: var(--font-body);
+  font-size: 13px;
+  background: #fff;
+  color: var(--ink);
+}
+.list-row .remove-row-btn { font-size: 14px; padding: 6px; }
+
+@media (max-width: 720px) {
+  .balance-head { display: none; }
+  .balance-row {
+    grid-template-columns: 1fr;
+    min-width: 0;
+    gap: 4px;
+    padding: 16px 18px;
+  }
+  .balance-row > span::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--ink-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
 }
